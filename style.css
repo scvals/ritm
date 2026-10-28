@@ -275,3 +275,26 @@ a{color:var(--accent)}
   .stats{grid-template-columns:1fr 1fr;gap:16px 14px}
   .st b{font-size:28px}
 }
+
+/* ---------- edit mode ---------- */
+.ed-h{cursor:default;gap:8px}
+.ed-title{font-family:var(--serif);font-size:20px;font-weight:600;background:transparent;border-color:transparent;padding-left:4px}
+.ed-title:hover{border-color:var(--line)}
+.ed-title:focus{background:var(--bg)}
+.ed-arrows{display:flex;align-items:center;gap:2px;flex:none}
+.ib.up svg{transform:rotate(-90deg)}
+.ib.down svg{transform:rotate(90deg)}
+.ib:disabled{opacity:.3;cursor:default;background:none}
+.ed-row{padding:10px 12px 10px 18px;display:flex;flex-direction:column;gap:6px}
+.ed-row + .ed-row{border-top:1px solid var(--line)}
+.ed-top{display:flex;align-items:center;gap:8px}
+.ed-top .in{background:transparent;border-color:transparent;padding-left:4px}
+.ed-top .in:hover{border-color:var(--line)}
+.ed-top .in:focus{background:var(--bg);border-color:var(--accent)}
+.ed-opts{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;padding-left:4px}
+.tg{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.tg input{accent-color:var(--accent);width:16px;height:16px;margin:0}
+.sel-sm{min-height:32px;padding:4px 8px;font-size:13px}
+.ed-add{border-top:1px solid var(--line);display:flex;flex-direction:column;gap:10px;background:color-mix(in srgb,var(--soft) 35%,transparent)}
+.btn svg.i{width:16px;height:16px}
+@media (max-width:860px){.ed-row{padding:10px 8px 10px 14px}}

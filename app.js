@@ -86,6 +86,9 @@ const DEFAULTS={
   ],
   hobby:{write:0,knit:0,eng:0,wish:[{id:"w1",name:"Игра на гитаре"},{id:"w2",name:"Шитьё"}]},
   learn:[],
+  layout:null,
+  custom:{},
+  itemOpts:{},
   weekNotes:{},
   created:null,
   _u:0
@@ -99,17 +102,25 @@ function saveUi(){lsSet("ritm-ui",JSON.stringify({cards:ui.cards}))}
 
 function mergeSettings(s){
   const out=clone(DEFAULTS);
-  if(!s)return out;
+  if(!s){out.layout=clone(DEFAULT_LAYOUT);return out}
   out.goals={...out.goals,...(s.goals||{})};
   if(Array.isArray(s.tasks))out.tasks=s.tasks;
   out.hobby={...out.hobby,...(s.hobby||{})};
   if(Array.isArray(s.learn))out.learn=s.learn;
+  out.custom=s.custom&&typeof s.custom==="object"?s.custom:{};
+  out.itemOpts=s.itemOpts&&typeof s.itemOpts==="object"?s.itemOpts:{};
+  if(Array.isArray(s.layout)&&s.layout.length)out.layout=s.layout;
+  else{out.layout=clone(DEFAULT_LAYOUT);
+    (out.learn||[]).forEach(l=>{out.custom[l.id]={type:"num",name:l.name,goal:l.goal||30,unit:"мин"};if(!l.archived)out.layout.find(x=>x.id==="learn").items.push(l.id)});}
+  out.learn=[];
   out.weekNotes=s.weekNotes||{};
   out.created=s.created||null;
   out._u=s._u||0;
   return out;
 }
 function seed(){
+  if(!state.settings.layout)state.settings.layout=clone(DEFAULT_LAYOUT);
+  state.settings.custom=state.settings.custom||{};state.settings.itemOpts=state.settings.itemOpts||{};
   if(!state.settings.created)state.settings.created=todayKey();
   state.settings.tasks.forEach(t=>{if(!t.last)t.last=state.settings.created});
 }
@@ -118,7 +129,7 @@ function seed(){
 const LS="ritm-tracker-v1";
 function loadLocal(){
   try{const raw=localStorage.getItem(LS);if(raw){const p=JSON.parse(raw);state={settings:mergeSettings(p.settings),days:p.days||{},books:p.books||{}}}}catch(e){}
-  seed();
+  seed();migrateDays();
 }
 let lsTimer=null;
 function saveLocal(now){clearTimeout(lsTimer);const f=()=>{try{localStorage.setItem(LS,JSON.stringify(state))}catch(e){}};if(now)f();else lsTimer=setTimeout(f,250)}
@@ -244,33 +255,89 @@ function readInput(el){
 const dayType=k=>{const w=dowOf(k);return w===0?"rest":([1,3,5].includes(w)?"strength":"cardio")};
 const D=k=>state.days[k]||{};
 const liveBooks=()=>Object.values(state.books).filter(b=>b&&!b._del);
-const learnList=()=>(state.settings.learn||[]).filter(l=>!l.archived);
 const strengthDone=d=>((d.train&&d.train.ex)||[]).some(e=>(e.sets||[]).some(s=>s.r||s.w));
 function courseDone(){let s=G().courseOffset||0;for(const k in state.days){s+=(state.days[k].course&&state.days[k].course.n)||0}return s}
 function scarfDone(){let s=0;for(const k in state.days){s+=(state.days[k].knit&&state.days[k].knit.cm)||0}return Math.round(s*10)/10}
-function sleepDur(s){if(!s||!s.bed||!s.wake)return null;let d=tmin(s.wake)-tmin(s.bed);if(d<=0)d+=1440;return d}
-function dayItems(k,courseTotalDone){
-  const d=D(k),g=G(),t=dayType(k),r=d.routine||{};
-  const it=[
-    ["r",!!r.glass],["r",!!r.wash],["r",!!r.shower],["r",!!r.clean],["r",!!r.nophone],
-    ["b",!!(d.sleep&&d.sleep.bed&&d.sleep.wake)],["b",(d.water||0)>=g.water],["b",((d.food&&d.food.kcal)||0)>0],["b",!!(d.well&&d.well.energy&&d.well.mood)],
-    ["m",(d.walk||0)>=g.walk]
-  ];
-  if(t!=="rest"){
-    it.push(["m",t==="strength"?strengthDone(d):((d.train&&d.train.cardio)||0)>=g.cardio]);
-    it.push(["u",(d.med||0)>=g.med],["u",(d.silence||0)>=g.silence]);
-    it.push(["c",((d.read&&d.read.f&&d.read.f.pages)||0)>=g.fiction],["c",((d.read&&d.read.s&&d.read.s.pages)||0)>=g.science]);
-    it.push(["l",((d.eng&&d.eng.min)||0)>=g.eng]);
-    const cdone=courseTotalDone==null?courseDone():courseTotalDone;
-    if(cdone<g.courseTotal||((d.course&&d.course.n)||0)>0)it.push(["l",((d.course&&d.course.n)||0)>=g.coursePerDay]);
-    learnList().forEach(l=>it.push(["l",((d.learn&&d.learn[l.id]&&d.learn[l.id].min)||0)>=(l.goal||1)]));
-    const w=d.write||{};
-    it.push(["h",!!w.s1],["h",!!w.s2],["h",!!w.s3],["h",!!w.left],["h",((d.knit&&d.knit.min)||0)>=g.knit]);
-  }
-  return it;
+/* Сон: ночь относится к утру, которым она закончилась. Отбой вносится вечером (d.night.bed), подъём — утром (d.sleep.wake) */
+function bedFor(k){const p=D(addDays(k,-1));return (p.night&&p.night.bed)||(D(k).sleep&&D(k).sleep.bed)||null}
+function sleepDurK(k){const bed=bedFor(k),wake=D(k).sleep&&D(k).sleep.wake;if(!bed||!wake)return null;let d=tmin(wake)-tmin(bed);if(d<=0)d+=1440;return d}
+function bedInGoal(t){const g=G();const n=x=>{let v=tmin(x);return v<12*60?v+1440:v};return n(t)>=n(g.bedFrom)&&n(t)<=n(g.bedTo)}
+const nowHM=()=>{const d=new Date();return `${pad(d.getHours())}:${pad(d.getMinutes())}`};
+
+/* ---------- layout: разделы и пункты «Сегодня» ---------- */
+const DEFAULT_LAYOUT=[
+  {id:"morning",title:"Утро",items:["wake","glass","wash","clean","shower"]},
+  {id:"food",title:"Питание и тело",items:["meal-b","meal-l","meal-d","meal-s","food","water","well","weight"]},
+  {id:"move",title:"Тренировка",items:["train","walk"]},
+  {id:"mind",title:"Ум и спокойствие",items:["med","silence"]},
+  {id:"read",title:"Чтение",items:["read-f","read-s"]},
+  {id:"learn",title:"Обучение",items:["eng","course"]},
+  {id:"hobby",title:"Хобби",items:["write-s1","write-s2","write-s3","write-left","write-control","knit","hobbynote"]},
+  {id:"evening",title:"Вечер и сон",items:["nophone","sleep"]}
+];
+const L=()=>state.settings.layout;
+const cxVal=(d,id)=>{const c=d.cx&&d.cx[id];if(c&&c.v!=null)return c.v;const l=d.learn&&d.learn[id];return l?l.min:null};
+
+/* Встроенные пункты. status(ctx): true/false — выполнено; null — сегодня не считается */
+const BI={
+  wake:{name:"Пробуждение",status:c=>!!(c.d.sleep&&c.d.sleep.wake)},
+  glass:{name:"Стакан воды после пробуждения",status:c=>!!(c.d.routine&&c.d.routine.glass)},
+  wash:{name:"Умыться",status:c=>!!(c.d.routine&&c.d.routine.wash)},
+  clean:{name:"Уборка",status:c=>!!(c.d.routine&&c.d.routine.clean)},
+  shower:{name:"Душ",status:c=>!!(c.d.routine&&c.d.routine.shower)},
+  nophone:{name:"Час без телефона перед сном",status:c=>!!(c.d.routine&&c.d.routine.nophone)},
+  "meal-b":{name:"Завтрак",status:c=>!!(c.d.food&&c.d.food.meals&&c.d.food.meals.b)},
+  "meal-l":{name:"Обед",status:c=>!!(c.d.food&&c.d.food.meals&&c.d.food.meals.l)},
+  "meal-d":{name:"Ужин",status:c=>!!(c.d.food&&c.d.food.meals&&c.d.food.meals.d)},
+  "meal-s":{name:"Перекус",counts:false,status:c=>!!(c.d.food&&c.d.food.meals&&c.d.food.meals.s)},
+  food:{name:"Калории и белок",status:c=>((c.d.food&&c.d.food.kcal)||0)>0},
+  water:{name:"Вода",status:c=>(c.d.water||0)>=c.g.water},
+  well:{name:"Самочувствие",status:c=>!!(c.d.well&&c.d.well.energy&&c.d.well.mood)},
+  weight:{name:"Вес",counts:false,status:c=>!!c.d.weight},
+  train:{name:"Тренировка",status:c=>c.rest?null:(c.t==="strength"?strengthDone(c.d):((c.d.train&&c.d.train.cardio)||0)>=c.g.cardio)},
+  walk:{name:"Прогулка",status:c=>(c.d.walk||0)>=c.g.walk},
+  med:{name:"Медитация",restOpt:true,status:c=>(c.d.med||0)>=c.g.med},
+  silence:{name:"Время тишины",restOpt:true,status:c=>(c.d.silence||0)>=c.g.silence},
+  "read-f":{name:"Художественная книга",restOpt:true,status:c=>((c.d.read&&c.d.read.f&&c.d.read.f.pages)||0)>=c.g.fiction},
+  "read-s":{name:"Научная книга",restOpt:true,status:c=>((c.d.read&&c.d.read.s&&c.d.read.s.pages)||0)>=c.g.science},
+  eng:{name:"Английский",restOpt:true,status:c=>((c.d.eng&&c.d.eng.min)||0)>=c.g.eng},
+  course:{name:"Курс по бизнесу",restOpt:true,status:c=>{const n=(c.d.course&&c.d.course.n)||0;return c.cd<c.g.courseTotal||n>0?n>=c.g.coursePerDay:null}},
+  "write-s1":{name:"Письмо левой: сессия 1",restOpt:true,status:c=>!!(c.d.write&&c.d.write.s1)},
+  "write-s2":{name:"Письмо левой: сессия 2",restOpt:true,status:c=>!!(c.d.write&&c.d.write.s2)},
+  "write-s3":{name:"Письмо левой: сессия 3",restOpt:true,status:c=>!!(c.d.write&&c.d.write.s3)},
+  "write-left":{name:"День левой руки в быту",restOpt:true,status:c=>!!(c.d.write&&c.d.write.left)},
+  "write-control":{name:"Контрольная фраза недели",counts:false,restOpt:true,status:c=>!!(c.d.write&&c.d.write.control)},
+  knit:{name:"Вязание",restOpt:true,status:c=>((c.d.knit&&c.d.knit.min)||0)>=c.g.knit},
+  hobbynote:{name:"Заметки по хобби",counts:false,restOpt:true,status:c=>!!c.d.hobbyNote},
+  sleep:{name:"Отбой",status:c=>!!(c.d.night&&c.d.night.bed)}
+};
+const CX_TYPES={check:"Галочка",num:"Число с нормой",note:"Заметка"};
+function itemDef(id){
+  if(BI[id])return{id,builtin:true,name:BI[id].name,counts:BI[id].counts!==false,restOpt:!!BI[id].restOpt};
+  const c=state.settings.custom&&state.settings.custom[id];
+  if(c)return{id,builtin:false,type:c.type,name:c.name||"Без названия",goal:c.goal,unit:c.unit||"",counts:c.type!=="note",restOpt:false};
+  return null;
+}
+function itemOpt(id){const d=itemDef(id);if(!d)return null;const o=(state.settings.itemOpts||{})[id]||{};
+  return {...d,name:o.name||d.name,named:!!o.name,counts:o.counts??d.counts,restOpt:o.restOpt??d.restOpt}}
+function itemStatus(id,c){
+  if(BI[id])return BI[id].status(c);
+  const def=state.settings.custom[id];if(!def)return null;
+  const v=cxVal(c.d,id);
+  if(def.type==="check")return !!v;
+  if(def.type==="num")return (Number(v)||0)>=(def.goal||1);
+  return !!(v&&String(v).trim());
+}
+const mkCtx=(k,cd)=>({k,d:D(k),g:G(),t:dayType(k),rest:dayType(k)==="rest",cd:cd==null?courseDone():cd});
+function dayItems(k,cd){
+  const c=mkCtx(k,cd),out=[];
+  for(const s of L())for(const id of s.items){const o=itemOpt(id);if(!o||!o.counts||(c.rest&&o.restOpt))continue;const st=itemStatus(id,c);if(st==null)continue;out.push([s.id,!!st])}
+  return out;
 }
 function dayPct(k,cd){const it=dayItems(k,cd);const done=it.filter(x=>x[1]).length;return{done,total:it.length,pct:it.length?Math.round(done/it.length*100):0}}
 function groupCount(items,g){const f=items.filter(x=>x[0]===g);return{d:f.filter(x=>x[1]).length,t:f.length}}
+function hiddenItems(){const used=new Set(L().flatMap(s=>s.items));return [...Object.keys(BI),...Object.keys(state.settings.custom||{})].filter(id=>!used.has(id))}
+function migrateDays(){for(const k in state.days){const d=state.days[k];if(d.learn){d.cx=d.cx||{};for(const id in d.learn){const l=d.learn[id];if(l&&!d.cx[id])d.cx[id]={v:l.min??null,note:l.note||""}}}}}
 const hasData=k=>{const d=state.days[k];return d&&Object.keys(d).some(x=>x!=="_u")};
 function lastWeightDay(before){let best=null;for(const k in state.days){const w=state.days[k].weight;if(w&&(!before||k<before)&&(!best||k>best))best=k}return best}
 function readingBooks(type){return liveBooks().filter(b=>b.type===type&&b.status==="reading")}
@@ -336,9 +403,107 @@ const valOf=(cur,goal,unit)=>`<b>${fmtN(cur,1)}</b> / ${goal} ${unit}`;
 /* ---------- views ---------- */
 const VIEWS=[["today","Сегодня"],["library","Книги"],["growth","Развитие"],["stats","Статистика"],["week","Неделя"],["settings","Настройки"]];
 
+function renderItem(id,o,c){
+  const {k,d,g,t}=c,lab=esc(o.name);
+  const optTag=c.rest&&o.restOpt?"по желанию":"";
+  const withOpt=s=>optTag?(s?s+" · ":"")+optTag:s;
+  const chk=(bind,sub="",val="")=>item({check:bind,label:lab,sub:withOpt(sub),val});
+  switch(id){
+    case "wake":{const sl=d.sleep||{},sd=sleepDurK(k),bed=bedFor(k);
+      return item({key:"wake",label:lab,done:!!sl.wake,
+        sub:sl.wake?[sd?`спал ${fmtDur(sd)}`:"",sl.q?`качество ${sl.q}/5`:"",tmin(sl.wake)>tmin(g.wake)+30?"позже цели":""].filter(Boolean).join(" · ")||`цель ${g.wake}`:`цель ${g.wake}`,
+        val:sl.wake?`<b>${sl.wake}</b>`:"",quick:sl.wake?"":`<button class="chip" data-act="now" data-bind="d.sleep.wake">Встал сейчас</button>`,
+        body:`${field("Время подъёма",timeIn("d.sleep.wake","Время подъёма"),`<span class="unit">цель ${g.wake}</span>`)}
+          ${field("Отбой накануне",bed?`<span>${bed}</span><span class="unit">${bedInGoal(bed)?"вовремя":"вне цели "+g.bedFrom+"–"+g.bedTo}</span>`:`<span class="unit">не отмечен вчера вечером</span>`)}
+          ${field("Длительность сна",`<span>${sd?fmtDur(sd):"—"}</span><span class="unit">цель ${g.sleepMin}–${g.sleepMax} ч</span>`)}
+          ${field("Как спал",rating("d.sleep.q","Качество сна"))}${area("d.sleep.note","Заметка о сне: что мешало, что помогло…")}`});}
+    case "glass":return chk("d.routine.glass");
+    case "wash":return chk("d.routine.wash");
+    case "clean":return chk("d.routine.clean");
+    case "shower":return chk("d.routine.shower");
+    case "nophone":return chk("d.routine.nophone");
+    case "meal-b":return chk("d.food.meals.b");
+    case "meal-l":return chk("d.food.meals.l");
+    case "meal-d":return chk("d.food.meals.d");
+    case "meal-s":return chk("d.food.meals.s");
+    case "food":{const f=d.food||{};
+      return item({key:"food",label:lab,done:(f.kcal||0)>0,sub:f.score?`питание на ${f.score}/5`:"",
+        val:`<b>${fmtN(f.kcal||0)}</b> ккал · <b>${fmtN(f.protein||0)}</b> г белка`,
+        body:`${field("Калории",num("d.food.kcal",{step:10,label:"Калории"}),`<span class="unit">из ${fmtN(g.kcal)} ккал</span>`)}${bar((f.kcal||0)/g.kcal)}
+          ${field("Белок",num("d.food.protein",{label:"Белок"}),`<span class="unit">из ${g.protein} г</span>`)}${bar((f.protein||0)/g.protein)}
+          ${field("Насколько правильно ел",rating("d.food.score","Оценка питания"))}${area("d.food.note","Что ел, что получилось, что нет…")}`});}
+    case "water":{const w=d.water||0;
+      return item({key:"water",label:lab,p:w/g.water,done:w>=g.water,sub:bar(w/g.water),val:valOf(w,fmtN(g.water),"мл"),
+        quick:`<button class="chip" data-act="water" data-n="250" aria-label="Добавить 250 мл">+250</button>`,
+        body:`<div class="btns"><button class="btn" data-act="water" data-n="250">+250 мл</button><button class="btn" data-act="water" data-n="500">+500 мл</button><button class="btn" data-act="water" data-n="1500">+1,5 л</button><button class="btn ghost" data-act="water" data-n="-250">−250</button></div>
+          ${field("Всего",num("d.water",{step:50,label:"Вода, мл"}),`<span class="unit">мл · протеиновые коктейли тоже сюда</span>`)}`});}
+    case "well":{const w=d.well||{};
+      return item({key:"well",label:lab,done:!!(w.energy&&w.mood),sub:"энергия · настроение, 1–5",val:`<b>${w.energy||"—"}</b> · <b>${w.mood||"—"}</b>`,
+        body:`${field("Энергия",rating("d.well.energy","Энергия"))}${field("Настроение",rating("d.well.mood","Настроение"))}`});}
+    case "weight":{const lw=lastWeightDay(k),lwAll=lastWeightDay(),due=!d.weight&&(!lwAll||diffDays(lwAll,k)>=7);
+      return item({key:"weight",label:lab,icon:IC.scale,done:!!d.weight,sub:due?"пора взвеситься":(lw?`прошлый: ${fmtN(state.days[lw].weight,1)} кг, ${fmtDM(lw)}`:"раз в неделю"),warn:due,
+        val:d.weight?`<b>${fmtN(d.weight,1)}</b> кг`:"",
+        body:field("Вес сегодня",num("d.weight",{step:0.1,label:"Вес",ph:"кг"}),`<span class="unit">кг${d.weight&&lw?` · ${d.weight-state.days[lw].weight>0?"+":""}${fmtN(d.weight-state.days[lw].weight,1)} к прошлому`:""}</span>`)});}
+    case "train":{
+      if(t==="strength"){const ex=(d.train&&d.train.ex)||[];const nSets=ex.reduce((s,e)=>s+(e.sets||[]).filter(x=>x.r||x.w).length,0);const prev=!ex.length?prevStrength(k):null;
+        return item({key:"train",label:o.named?lab:"Силовая тренировка",done:strengthDone(d),sub:ex.length?ex.map(e=>esc(e.name||"без названия")).join(", "):(prev?`прошлая тренировка: ${fmtDM(prev)}`:"упражнения не записаны"),
+          val:ex.length?`<b>${ex.length}</b> упр. · <b>${nSets}</b> подх.`:"",
+          body:ex.map((e,i)=>`<div class="ex"><div class="ex-head"><input class="in txt" list="exnames" placeholder="Название упражнения" data-bind="d.train.ex.${i}.name" data-k="d.train.ex.${i}.name" value="${esc(e.name||"")}"><button class="x" data-act="ex-del" data-i="${i}" aria-label="Удалить упражнение">${IC.close}</button></div>
+            <div class="sets">${(e.sets||[]).map((s,j)=>`<div class="set"><span class="set-n">${j+1}</span>${num(`d.train.ex.${i}.sets.${j}.r`,{cls:"sm",ph:"повт",label:"Повторения"})}<span class="muted">×</span>${num(`d.train.ex.${i}.sets.${j}.w`,{cls:"sm",step:0.5,ph:"кг",label:"Вес"})}<span class="unit">кг</span><button class="x" data-act="set-del" data-i="${i}" data-j="${j}" aria-label="Удалить подход">${IC.close}</button></div>`).join("")}</div>
+            <button class="link" data-act="set-add" data-i="${i}">+ подход</button></div>`).join("")
+            +`<div class="btns"><button class="btn" data-act="ex-add">+ упражнение</button>${prev?`<button class="btn ghost" data-act="ex-copy" data-from="${prev}">Взять упражнения с ${fmtDM(prev)}</button>`:""}</div>
+            ${area("d.train.note","Заметка: самочувствие, что получилось…")}`});}
+      if(t==="cardio"){const cv=(d.train&&d.train.cardio)||0;
+        return item({key:"cardio",label:o.named?lab:"Кардио: беговая дорожка",p:cv/g.cardio,done:cv>=g.cardio,dotAct:fillDot("d.train.cardio",g.cardio),val:valOf(cv,`${g.cardio}–${g.cardioMax}`,"мин"),
+          body:`${field("Минут",num("d.train.cardio",{label:"Кардио, минут"}),chipsFill("d.train.cardio",[10],g.cardio))}${area("d.train.note","Заметка: темп, наклон, самочувствие…")}`});}
+      return item({key:"restnote",label:"Тренировки сегодня нет",sub:"восстановление тоже часть прогресса",icon:IC.moon});}
+    case "walk":{const w=d.walk||0;return item({key:"walk",label:lab,p:w/g.walk,done:w>=g.walk,dotAct:fillDot("d.walk",g.walk),val:valOf(w,`${g.walk}–${g.walkMax}`,"мин"),sub:withOpt(""),
+      body:field("Минут",num("d.walk",{label:"Прогулка, минут"}),chipsFill("d.walk",[5],g.walk))});}
+    case "med":{const m=d.med||0;return item({key:"med",label:lab,sub:withOpt(""),p:m/g.med,done:m>=g.med,dotAct:fillDot("d.med",g.med),val:valOf(m,g.med,"мин"),body:field("Минут",num("d.med",{label:"Медитация, минут"}),chipsFill("d.med",[5],g.med))});}
+    case "silence":{const m=d.silence||0;return item({key:"silence",label:lab,sub:withOpt("без телефона и занятий — просто сидишь и обдумываешь"),p:m/g.silence,done:m>=g.silence,dotAct:fillDot("d.silence",g.silence),val:valOf(m,g.silence,"мин"),body:field("Минут",num("d.silence",{label:"Тишина, минут"}),chipsFill("d.silence",[5],g.silence))});}
+    case "read-f":case "read-s":{const type=id.slice(-1),goal=type==="f"?g.fiction:g.science;
+      const books=readingBooks(type);const cur=(d.read&&d.read[type]&&d.read[type].book)||(books[0]&&books[0].id)||"";
+      const b=state.books[cur]&&!state.books[cur]._del?state.books[cur]:null;const pages=(d.read&&d.read[type]&&d.read[type].pages)||0;
+      const sel=books.length?`<select class="in" data-reading-book="${type}" data-k="rb-${type}" aria-label="Книга">${books.map(x=>`<option value="${x.id}" ${x.id===cur?"selected":""}>${esc(x.title)}</option>`).join("")}</select>`:`<button class="link" data-act="nav" data-view="library" data-tab="${type}">Добавить книгу в библиотеку</button>`;
+      return item({key:id,label:lab,p:pages/goal,done:pages>=goal,dotAct:{act:"read-fill",attrs:`data-type="${type}" data-book="${cur}" data-goal="${goal}"`},
+        sub:withOpt(b?`${esc(b.title)}${b.total?` · стр. ${b.cur||0} из ${b.total} · ${Math.round((b.cur||0)/b.total*100)}%`:""}`:"книга не выбрана"),val:valOf(pages,goal,"стр."),
+        body:`${field("Страниц сегодня",`<input class="in num" type="number" min="0" inputmode="numeric" data-reading="${type}" data-book="${cur}" data-k="rp-${type}" value="${pages||""}" aria-label="Страниц сегодня">`,`<span class="unit">книга сдвинется автоматически</span>`)}${field("Книга",sel)}${b&&b.total?bar((b.cur||0)/b.total,"thick"):""}`});}
+    case "eng":{const st=PLANS.eng[state.settings.hobby.eng]||PLANS.eng[0],m=(d.eng&&d.eng.min)||0;
+      return item({key:"eng",label:lab,sub:withOpt(st[0]),p:m/g.eng,done:m>=g.eng,dotAct:fillDot("d.eng.min",g.eng),val:valOf(m,g.eng,"мин"),
+        body:`${field("Минут",num("d.eng.min",{label:"Английский, минут"}),chipsFill("d.eng.min",[5,10],g.eng))}<p class="hint">${st[1]}</p>${area("d.eng.note","Итоги: что выучил, на чём застрял (необязательно)")}`});}
+    case "course":{const cd=c.cd,cn=(d.course&&d.course.n)||0,left=Math.max(0,g.courseTotal-cd),fin=courseFinish();
+      return item({key:"course",label:lab,sub:withOpt(left?`пройдено ${cd} из ${g.courseTotal}${fin?` · финиш ~${fmtDM(fin)}`:""}`:"курс пройден целиком"),p:cn/g.coursePerDay,done:cn>=g.coursePerDay,dotAct:fillDot("d.course.n",g.coursePerDay),
+        val:valOf(cn,g.coursePerDay,plural(g.coursePerDay,"урок","урока","уроков")),
+        body:`${field("Уроков сегодня",num("d.course.n",{label:"Уроков сегодня"}),chipsFill("d.course.n",[1],g.coursePerDay))}${bar(cd/g.courseTotal,"thick")}${area("d.course.note","Итоги: главное из уроков в паре строк (необязательно)")}`});}
+    case "write-s1":case "write-s2":case "write-s3":{const n=id.slice(-1),hb=state.settings.hobby,ws=PLANS.write[hb.write]||PLANS.write[0];
+      const kind=n==="3"||hb.write>=1?"переписывание текста":"пропись";
+      return item({check:`d.write.s${n}`,label:o.named?lab:`Письмо левой: сессия ${n} — ${kind}`,sub:withOpt(ws[0]),val:`${g["w"+n]} мин`});}
+    case "write-left":return chk("d.write.left","все бытовые действия левой; нож — осторожно, с мягких продуктов");
+    case "write-control":return chk("d.write.control","раз в неделю, для сравнения почерка");
+    case "knit":{const ks=PLANS.knit[state.settings.hobby.knit]||PLANS.knit[0],sc=scarfDone(),km=(d.knit&&d.knit.min)||0;
+      return item({key:"knit",label:lab,sub:withOpt(`${ks[0]} · шарф ${fmtN(sc,1)} из ${g.scarfLen} см${d.knit&&d.knit.cm?` · сегодня +${fmtN(d.knit.cm,1)}`:""}`),p:km/g.knit,done:km>=g.knit,dotAct:fillDot("d.knit.min",g.knit),val:valOf(km,g.knit,"мин"),
+        body:`${field("Минут",num("d.knit.min",{label:"Вязание, минут"}),chipsFill("d.knit.min",[10,20],g.knit))}${field("Шарф сегодня",`<span class="unit">+</span>${num("d.knit.cm",{step:0.5,label:"Сантиметров сегодня"})}`,`<span class="unit">см · цель к концу ноября ≈ 7 см в день</span>`)}${bar(sc/g.scarfLen,"thick")}`});}
+    case "hobbynote":return item({key:"hobbynote",label:lab,icon:IC.pen,done:!!d.hobbyNote,sub:d.hobbyNote?esc(d.hobbyNote.slice(0,70)):"",body:area("d.hobbyNote","Что получилось, идеи, трудности…",3)});
+    case "sleep":{const bed=d.night&&d.night.bed;
+      return item({key:"sleep",label:lab,done:!!bed,
+        sub:bed?(bedInGoal(bed)?"вовремя":`вне цели ${g.bedFrom}–${g.bedTo}`):`цель ${g.bedFrom}–${g.bedTo} · длительность посчитается утром`,warn:!!bed&&!bedInGoal(bed),
+        val:bed?`<b>${bed}</b>`:"",quick:bed?"":`<button class="chip" data-act="bed-now">Ложусь сейчас</button>`,
+        body:`${field("Время отбоя",timeIn("d.night.bed","Время отбоя"),`<span class="unit">цель ${g.bedFrom}–${g.bedTo}</span>`)}<p class="hint">Длительность сна посчитается утром, когда отметишь «Пробуждение». Если ложишься после полуночи — кнопка «Ложусь сейчас» сама запишет время во вчерашний день.</p>`});}
+  }
+  // свои пункты
+  const def=state.settings.custom[id];if(!def)return "";
+  const v=cxVal(d,id);
+  if(def.type==="check")return item({check:`d.cx.${id}.v`,label:lab,sub:withOpt("")});
+  if(def.type==="num"){const gl=def.goal||1,cur=Number(v)||0;
+    return item({key:"cx-"+id,label:lab,sub:withOpt(""),p:cur/gl,done:cur>=gl,dotAct:fillDot(`d.cx.${id}.v`,gl),val:valOf(cur,gl,esc(def.unit||"")),
+      body:`${field("Сегодня",num(`d.cx.${id}.v`,{label:o.name}),`<span class="unit">${esc(def.unit||"")}</span>${chipsFill(`d.cx.${id}.v`,[],gl)}`)}${area(`d.cx.${id}.note`,"Заметка или итоги (необязательно)")}`});}
+  return item({key:"cx-"+id,label:lab,icon:IC.pen,done:!!(v&&String(v).trim()),sub:v?esc(String(v).slice(0,70)):withOpt(""),body:area(`d.cx.${id}.v`,"Запиши здесь…",3)});
+}
+
 function viewToday(){
+  if(ui.edit)return viewEdit();
   const k=ui.date,d=D(k),g=G(),t=dayType(k),rest=t==="rest",isToday=k===todayKey();
-  const cd=courseDone(),items=dayItems(k,cd),P=dayPct(k,cd);
+  const cd=courseDone(),c=mkCtx(k,cd),items=dayItems(k,cd),P=dayPct(k,cd);
   const titles={strength:"Силовая тренировка",cardio:"Кардио: ходьба",rest:"День отдыха"};
   const subs={strength:"Полный день",cardio:"Полный день",rest:"Обязательна только базовая рутина"};
   const C=2*Math.PI*38;
@@ -347,126 +512,57 @@ function viewToday(){
     <h1>${titles[t]}</h1><p class="lead">${subs[t]} · выполнено ${P.done} из ${P.total}</p></div>
     <div class="ring" role="img" aria-label="Выполнено ${P.pct}%"><svg viewBox="0 0 84 84"><circle class="tr" cx="42" cy="42" r="38"/><circle class="pr" cx="42" cy="42" r="38" stroke-dasharray="${C}" stroke-dashoffset="${C*(1-P.pct/100)}"/></svg><div class="rv"><b>${P.pct}%</b><span>дня</span></div></div></div>`;
 
-  // Пора сделать
   if(isToday){
     const due=state.settings.tasks.filter(x=>diffDays(x.last||k,k)>=x.every);
-    const lw=lastWeightDay(),weighDue=!d.weight&&(!lw||diffDays(lw,k)>=7);
+    const lw=lastWeightDay(),weighDue=!d.weight&&(!lw||diffDays(lw,k)>=7)&&L().some(s=>s.items.includes("weight"));
     if(due.length||weighDue){
       let b=due.map(x=>{const over=diffDays(x.last||k,k)-x.every;return item({key:"due-"+x.id,label:esc(x.name),sub:`раз в ${x.every} ${plural(x.every,"день","дня","дней")}${over>0?` · просрочено на ${over} ${plural(over,"день","дня","дней")}`:""}`,warn:over>0,dotAct:{act:"task-done",attrs:`data-id="${x.id}"`},quick:`<button class="chip" data-act="task-done" data-id="${x.id}">Сделано</button>`})}).join("");
       if(weighDue)b+=item({key:"due-weight",label:"Пора взвеситься",sub:lw?`последний раз ${fmtDM(lw)}`:"вес ещё не вносился",icon:IC.scale,quick:`<button class="chip" data-act="open-weight">Внести вес</button>`});
       h+=card({key:"due",title:"Пора сделать",body:b,extra:`${due.length+(weighDue?1:0)}`});
     }
   }
-
-  // Рутина
-  h+=card({key:"routine",title:"Рутина",cnt:groupCount(items,"r"),body:
-    item({check:"d.routine.glass",label:"Стакан воды после пробуждения"})+item({check:"d.routine.wash",label:"Умыться"})+item({check:"d.routine.shower",label:"Душ"})+item({check:"d.routine.clean",label:"Уборка"})+item({check:"d.routine.nophone",label:"Час без телефона перед сном"})});
-
-  // Тело
-  const sl=d.sleep||{},sd=sleepDur(sl);
-  let bedOk=null;if(sl.bed){let b=tmin(sl.bed);if(b<12*60)b+=1440;let f=tmin(g.bedFrom),tt=tmin(g.bedTo);if(f<12*60)f+=1440;if(tt<12*60)tt+=1440;bedOk=b>=f&&b<=tt}
-  const water=d.water||0,f=d.food||{},w=d.well||{};
-  const meals=[["b","завтрак"],["l","обед"],["d","ужин"],["s","перекус"]];
-  const mealsOn=meals.filter(m=>f.meals&&f.meals[m[0]]).map(m=>m[1]);
-  const lw=lastWeightDay(k),lwAll=lastWeightDay();
-  const weighDue=!d.weight&&(!lwAll||diffDays(lwAll,k)>=7);
-  let body=item({key:"sleep",label:"Сон",done:!!(sl.bed&&sl.wake),
-      sub:sd?`${sl.bed} → ${sl.wake}${bedOk===null?"":bedOk?" · отбой вовремя":" · отбой вне цели"}${sl.q?` · качество ${sl.q}/5`:""}`:`цель: отбой ${g.bedFrom}–${g.bedTo}, подъём ${g.wake}`,
-      val:sd?`<b>${fmtDur(sd)}</b>`:"",
-      body:`${field("Отбой",timeIn("d.sleep.bed","Отбой"))}${field("Подъём",timeIn("d.sleep.wake","Подъём"))}
-        ${field("Длительность",`<span>${sd?fmtDur(sd):"—"}</span><span class="unit">цель ${g.sleepMin}–${g.sleepMax} ч</span>`)}
-        ${field("Качество",rating("d.sleep.q","Качество сна"))}${area("d.sleep.note","Заметка: как спал, что мешало…")}`})
-    +item({key:"water",label:"Вода",p:water/g.water,done:water>=g.water,sub:bar(water/g.water),val:valOf(water,fmtN(g.water),"мл"),
-      quick:`<button class="chip" data-act="water" data-n="250" aria-label="Добавить 250 мл">+250</button>`,
-      body:`<div class="btns"><button class="btn" data-act="water" data-n="250">+250 мл</button><button class="btn" data-act="water" data-n="500">+500 мл</button><button class="btn" data-act="water" data-n="1500">+1,5 л</button><button class="btn ghost" data-act="water" data-n="-250">−250</button></div>
-        ${field("Всего",num("d.water",{step:50,label:"Вода, мл"}),`<span class="unit">мл · протеиновые коктейли тоже сюда</span>`)}`})
-    +item({key:"food",label:"Питание",done:(f.kcal||0)>0,
-      sub:mealsOn.length?cap(mealsOn.join(", ")):"приёмы пищи не отмечены",
-      val:`<b>${fmtN(f.kcal||0)}</b> ккал · <b>${fmtN(f.protein||0)}</b> г белка`,
-      body:`<span class="btns">${meals.map(m=>{const on=!!(f.meals&&f.meals[m[0]]);return `<button class="chip ${on?"on":"ghost"}" data-act="toggle-bool" data-bind="d.food.meals.${m[0]}" aria-pressed="${on}">${cap(m[1])}</button>`}).join("")}</span>
-        ${field("Калории",num("d.food.kcal",{step:10,label:"Калории"}),`<span class="unit">из ${fmtN(g.kcal)} ккал</span>`)}${bar((f.kcal||0)/g.kcal)}
-        ${field("Белок",num("d.food.protein",{label:"Белок"}),`<span class="unit">из ${g.protein} г</span>`)}${bar((f.protein||0)/g.protein)}
-        ${field("Насколько правильно ел",rating("d.food.score","Оценка питания"))}${area("d.food.note","Что ел, что получилось, что нет…")}`})
-    +item({key:"well",label:"Самочувствие",done:!!(w.energy&&w.mood),
-      sub:"энергия · настроение, 1–5",val:`<b>${w.energy||"—"}</b> · <b>${w.mood||"—"}</b>`,
-      body:`${field("Энергия",rating("d.well.energy","Энергия"))}${field("Настроение",rating("d.well.mood","Настроение"))}`})
-    +item({key:"weight",label:"Вес",icon:IC.scale,done:!!d.weight,sub:weighDue?"пора взвеситься":(lw?`прошлый: ${fmtN(state.days[lw].weight,1)} кг, ${fmtDM(lw)}`:"раз в неделю"),warn:weighDue,
-      val:d.weight?`<b>${fmtN(d.weight,1)}</b> кг`:"",
-      body:field("Вес сегодня",num("d.weight",{step:0.1,label:"Вес",ph:"кг"}),`<span class="unit">кг${d.weight&&lw?` · ${d.weight-state.days[lw].weight>0?"+":""}${fmtN(d.weight-state.days[lw].weight,1)} к прошлому`:""}</span>`)});
-  h+=card({key:"body",title:"Тело",cnt:groupCount(items,"b"),body});
-
-  // Движение
-  let mv="";
-  if(t==="strength"){
-    const ex=(d.train&&d.train.ex)||[];const nSets=ex.reduce((s,e)=>s+(e.sets||[]).filter(x=>x.r||x.w).length,0);
-    const prev=!ex.length?prevStrength(k):null;
-    mv+=item({key:"train",label:"Силовая",done:strengthDone(d),sub:ex.length?ex.map(e=>esc(e.name||"без названия")).join(", "):(prev?`прошлая тренировка: ${fmtDM(prev)}`:"упражнения не записаны"),
-      val:ex.length?`<b>${ex.length}</b> упр. · <b>${nSets}</b> подх.`:"",
-      body:ex.map((e,i)=>`<div class="ex"><div class="ex-head"><input class="in txt" list="exnames" placeholder="Название упражнения" data-bind="d.train.ex.${i}.name" data-k="d.train.ex.${i}.name" value="${esc(e.name||"")}"><button class="x" data-act="ex-del" data-i="${i}" aria-label="Удалить упражнение">${IC.close}</button></div>
-        <div class="sets">${(e.sets||[]).map((s,j)=>`<div class="set"><span class="set-n">${j+1}</span>${num(`d.train.ex.${i}.sets.${j}.r`,{cls:"sm",ph:"повт",label:"Повторения"})}<span class="muted">×</span>${num(`d.train.ex.${i}.sets.${j}.w`,{cls:"sm",step:0.5,ph:"кг",label:"Вес"})}<span class="unit">кг</span><button class="x" data-act="set-del" data-i="${i}" data-j="${j}" aria-label="Удалить подход">${IC.close}</button></div>`).join("")}</div>
-        <button class="link" data-act="set-add" data-i="${i}">+ подход</button></div>`).join("")
-        +`<div class="btns"><button class="btn" data-act="ex-add">+ упражнение</button>${prev?`<button class="btn ghost" data-act="ex-copy" data-from="${prev}">Взять упражнения с ${fmtDM(prev)}</button>`:""}</div>
-        ${area("d.train.note","Заметка: самочувствие, что получилось…")}`});
-  }else if(t==="cardio"){
-    const c=(d.train&&d.train.cardio)||0;
-    mv+=item({key:"cardio",label:"Кардио: беговая дорожка",p:c/g.cardio,done:c>=g.cardio,dotAct:fillDot("d.train.cardio",g.cardio),val:valOf(c,`${g.cardio}–${g.cardioMax}`,"мин"),
-      body:`${field("Минут",num("d.train.cardio",{label:"Кардио, минут"}),chipsFill("d.train.cardio",[10],g.cardio))}${area("d.train.note","Заметка: темп, наклон, самочувствие…")}`});
-  }else{
-    mv+=item({key:"restnote",label:"Тренировки сегодня нет",sub:"восстановление тоже часть прогресса",icon:IC.moon});
+  for(const s of L()){
+    const opts=s.items.map(itemOpt).filter(Boolean);
+    const allOpt=rest&&opts.length>0&&opts.every(o=>o.restOpt||!o.counts);
+    const cnt=groupCount(items,s.id);
+    const body=opts.map(o=>renderItem(o.id,o,c)).join("")||`<div class="pad empty">Пусто. Нажми «Настроить разделы» внизу, чтобы добавить пункты.</div>`;
+    h+=card({key:(allOpt?"rest-":"")+"sec-"+s.id,title:esc(s.title),cnt:allOpt?null:cnt,tag:allOpt?"по желанию":"",def:allOpt,body});
   }
-  const walk=d.walk||0;
-  mv+=item({key:"walk",label:"Прогулка",p:walk/g.walk,done:walk>=g.walk,dotAct:fillDot("d.walk",g.walk),val:valOf(walk,`${g.walk}–${g.walkMax}`,"мин"),
-    body:field("Минут",num("d.walk",{label:"Прогулка, минут"}),chipsFill("d.walk",[5],g.walk))});
-  h+=card({key:"move",title:"Движение",cnt:groupCount(items,"m"),body:mv});
+  h+=`<div class="btns" style="justify-content:center;margin-top:18px"><button class="btn ghost" data-act="edit-on">${IC.pen}<span>Настроить разделы и пункты</span></button></div>`;
+  return h;
+}
 
-  const opt=rest?"по желанию":"";
-  const rk=x=>(rest?"rest-":"")+x;
-  // Ум
-  const med=d.med||0,sil=d.silence||0;
-  h+=card({key:rk("mind"),title:"Ум и спокойствие",cnt:rest?null:groupCount(items,"u"),tag:opt,def:rest,body:
-    item({key:"med",label:"Медитация",p:med/g.med,done:med>=g.med,dotAct:fillDot("d.med",g.med),val:valOf(med,g.med,"мин"),body:field("Минут",num("d.med",{label:"Медитация, минут"}),chipsFill("d.med",[5],g.med))})
-   +item({key:"silence",label:"Время тишины",sub:"без телефона и занятий — просто сидишь и обдумываешь",p:sil/g.silence,done:sil>=g.silence,dotAct:fillDot("d.silence",g.silence),val:valOf(sil,g.silence,"мин"),body:field("Минут",num("d.silence",{label:"Тишина, минут"}),chipsFill("d.silence",[5],g.silence))})});
-
-  // Чтение
-  const readItem=(type,label,goal)=>{
-    const books=readingBooks(type);const cur=(d.read&&d.read[type]&&d.read[type].book)||(books[0]&&books[0].id)||"";
-    const b=state.books[cur]&&!state.books[cur]._del?state.books[cur]:null;const pages=(d.read&&d.read[type]&&d.read[type].pages)||0;
-    const sel=books.length?`<select class="in" data-reading-book="${type}" data-k="rb-${type}" aria-label="Книга">${books.map(x=>`<option value="${x.id}" ${x.id===cur?"selected":""}>${esc(x.title)}</option>`).join("")}</select>`:`<button class="link" data-act="nav" data-view="library" data-tab="${type}">Добавить книгу в библиотеку</button>`;
-    return item({key:"read-"+type,label,p:pages/goal,done:pages>=goal,dotAct:{act:"read-fill",attrs:`data-type="${type}" data-book="${cur}" data-goal="${goal}"`},
-      sub:b?`${esc(b.title)}${b.total?` · стр. ${b.cur||0} из ${b.total} · ${Math.round((b.cur||0)/b.total*100)}%`:""}`:"книга не выбрана",
-      val:valOf(pages,goal,"стр."),
-      body:`${field("Страниц сегодня",`<input class="in num" type="number" min="0" inputmode="numeric" data-reading="${type}" data-book="${cur}" data-k="rp-${type}" value="${pages||""}" aria-label="Страниц сегодня">`,`<span class="unit">книга сдвинется автоматически</span>`)}${field("Книга",sel)}${b&&b.total?bar((b.cur||0)/b.total,"thick"):""}`});
-  };
-  h+=card({key:rk("read"),title:"Чтение",cnt:rest?null:groupCount(items,"c"),tag:opt,def:rest,body:readItem("f","Художественная",g.fiction)+readItem("s","Научная",g.science)});
-
-  // Обучение
-  const engSt=PLANS.eng[state.settings.hobby.eng]||PLANS.eng[0];
-  const em=(d.eng&&d.eng.min)||0,cn=(d.course&&d.course.n)||0,left=Math.max(0,g.courseTotal-cd),fin=courseFinish();
-  let ln=item({key:"eng",label:"Английский",sub:engSt[0],p:em/g.eng,done:em>=g.eng,dotAct:fillDot("d.eng.min",g.eng),val:valOf(em,g.eng,"мин"),
-      body:`${field("Минут",num("d.eng.min",{label:"Английский, минут"}),chipsFill("d.eng.min",[5,10],g.eng))}<p class="hint">${engSt[1]}</p>${area("d.eng.note","Итоги: что выучил, на чём застрял (необязательно)")}`})
-    +item({key:"course",label:"Курс по бизнесу",sub:left?`пройдено ${cd} из ${g.courseTotal}${fin?` · финиш ~${fmtDM(fin)}`:""}`:"курс пройден целиком",p:cn/g.coursePerDay,done:cn>=g.coursePerDay,dotAct:fillDot("d.course.n",g.coursePerDay),
-      val:valOf(cn,g.coursePerDay,plural(g.coursePerDay,"урок","урока","уроков")),
-      body:`${field("Уроков сегодня",num("d.course.n",{label:"Уроков сегодня"}),chipsFill("d.course.n",[1],g.coursePerDay))}${bar(cd/g.courseTotal,"thick")}${area("d.course.note","Итоги: главное из уроков в паре строк (необязательно)")}`});
-  learnList().forEach(l=>{const m=(d.learn&&d.learn[l.id]&&d.learn[l.id].min)||0;const gl=l.goal||1;
-    ln+=item({key:"learn-"+l.id,label:esc(l.name),p:m/gl,done:m>=gl,dotAct:fillDot(`d.learn.${l.id}.min`,gl),val:valOf(m,gl,"мин"),
-      body:`${field("Минут",num(`d.learn.${l.id}.min`,{label:"Минут"}),chipsFill(`d.learn.${l.id}.min`,[10],gl))}${area(`d.learn.${l.id}.note`,"Итоги (необязательно)")}`})});
-  h+=card({key:rk("learn"),title:"Обучение",cnt:rest?null:groupCount(items,"l"),tag:opt,def:rest,body:ln});
-
-  // Хобби
-  const hb=state.settings.hobby,ws=PLANS.write[hb.write]||PLANS.write[0],ks=PLANS.knit[hb.knit]||PLANS.knit[0];
-  const s1=hb.write>=1?"Переписывание текста":"Пропись";
-  const sc=scarfDone(),km=(d.knit&&d.knit.min)||0;
-  let hh=`<div class="sh">Письмо левой рукой <span>${ws[0]}</span></div>`
-    +item({check:"d.write.s1",label:`Сессия 1 — ${s1.toLowerCase()}`,val:`${g.w1} мин`})
-    +item({check:"d.write.s2",label:`Сессия 2 — ${s1.toLowerCase()}`,val:`${g.w2} мин`})
-    +item({check:"d.write.s3",label:"Сессия 3 — переписывание текста",val:`${g.w3} мин`})
-    +item({check:"d.write.left",label:"День левой руки в быту",sub:"все бытовые действия левой; нож — осторожно, с мягких продуктов"})
-    +item({check:"d.write.control",label:"Контрольная фраза недели",sub:"раз в неделю, для сравнения — на процент не влияет"})
-    +`<div class="sh" style="border-top:1px solid var(--line)">Вязание <span>${ks[0]}</span></div>`
-    +item({key:"knit",label:"Вязание",sub:`шарф: ${fmtN(sc,1)} из ${g.scarfLen} см${d.knit&&d.knit.cm?` · сегодня +${fmtN(d.knit.cm,1)} см`:""}`,p:km/g.knit,done:km>=g.knit,dotAct:fillDot("d.knit.min",g.knit),val:valOf(km,g.knit,"мин"),
-      body:`${field("Минут",num("d.knit.min",{label:"Вязание, минут"}),chipsFill("d.knit.min",[10,20],g.knit))}${field("Шарф сегодня",`<span class="unit">+</span>${num("d.knit.cm",{step:0.5,label:"Сантиметров сегодня"})}`,`<span class="unit">см · цель к концу ноября ≈ 7 см в день</span>`)}${bar(sc/g.scarfLen,"thick")}`})
-        +item({key:"hobbynote",label:"Заметки по хобби",icon:IC.pen,done:!!d.hobbyNote,sub:d.hobbyNote?esc(d.hobbyNote.slice(0,70)):"",body:area("d.hobbyNote","Что получилось, идеи, трудности…",3)});
-  h+=card({key:rk("hobby"),title:"Хобби",cnt:rest?null:groupCount(items,"h"),tag:opt,def:rest,body:hh});
+function viewEdit(){
+  const lay=L(),secOpts=i=>lay.map((s,j)=>`<option value="${j}" ${i===j?"selected":""}>${esc(s.title)}</option>`).join("");
+  const hidden=hiddenItems();
+  let h=`<div class="page-head"><div><h1>Настройка дня</h1><p class="lead">Порядок, названия, разделы и пункты. Всё сохраняется сразу.</p></div><button class="btn primary" data-act="edit-done">Готово</button></div>`;
+  lay.forEach((s,i)=>{
+    const rows=s.items.map((id,j)=>{const o=itemOpt(id);if(!o)return "";const cdef=!o.builtin?state.settings.custom[id]:null;
+      return `<div class="ed-row">
+        <div class="ed-top"><input class="in txt" data-iname="${id}" data-k="in-${id}" value="${esc(o.name)}" aria-label="Название пункта">
+          <span class="ed-arrows"><button class="ib up" data-act="item-move" data-s="${i}" data-j="${j}" data-d="-1" ${j===0?"disabled":""} aria-label="Выше">${IC.chev}</button><button class="ib down" data-act="item-move" data-s="${i}" data-j="${j}" data-d="1" ${j===s.items.length-1?"disabled":""} aria-label="Ниже">${IC.chev}</button><button class="x" data-act="item-hide" data-s="${i}" data-j="${j}" aria-label="Убрать пункт" title="Убрать пункт">${IC.close}</button></span></div>
+        <div class="ed-opts">
+          <span class="unit">${o.builtin?"стандартный":CX_TYPES[cdef.type]||""}</span>
+          ${cdef&&cdef.type==="num"?`<span class="f" style="gap:6px"><span class="unit">норма</span><input class="in num sm" type="number" min="0" data-cxgoal="${id}" data-k="cg-${id}" value="${cdef.goal??""}" aria-label="Норма"><input class="in sm" type="text" data-cxunit="${id}" data-k="cu-${id}" value="${esc(cdef.unit||"")}" placeholder="мин" aria-label="Единица"></span>`:""}
+          <label class="tg"><input type="checkbox" data-iopt="${id}" data-key="counts" ${o.counts?"checked":""}> в процент дня</label>
+          <label class="tg"><input type="checkbox" data-iopt="${id}" data-key="restOpt" ${o.restOpt?"checked":""}> в вс — по желанию</label>
+          ${lay.length>1?`<select class="in sel-sm" data-imove="${id}" data-s="${i}" aria-label="Перенести в раздел">${secOpts(i)}</select>`:""}
+        </div></div>`}).join("");
+    h+=`<section class="card"><header class="card-h ed-h">
+      <input class="in txt ed-title" data-sec-title="${i}" data-k="st-${i}" value="${esc(s.title)}" aria-label="Название раздела">
+      <span class="ed-arrows"><button class="ib up" data-act="sec-move" data-s="${i}" data-d="-1" ${i===0?"disabled":""} aria-label="Раздел выше">${IC.chev}</button><button class="ib down" data-act="sec-move" data-s="${i}" data-d="1" ${i===lay.length-1?"disabled":""} aria-label="Раздел ниже">${IC.chev}</button></span>
+    </header><div class="card-b">${rows||`<div class="pad empty">В разделе нет пунктов.</div>`}
+      <div class="pad ed-add">
+        <div class="btns"><input class="in txt" id="nn-${i}" type="text" placeholder="Новый пункт" style="min-width:160px">
+          <select class="in sel-sm" id="nt-${i}" aria-label="Тип">${Object.entries(CX_TYPES).map(([v,l])=>`<option value="${v}">${l}</option>`).join("")}</select>
+          <button class="btn" data-act="item-add" data-s="${i}">+ Добавить</button></div>
+        ${hidden.length?`<div class="btns"><select class="in sel-sm" id="nh-${i}" aria-label="Скрытый пункт">${hidden.map(id=>`<option value="${id}">${esc(itemOpt(id).name)}</option>`).join("")}</select><button class="btn ghost" data-act="item-restore" data-s="${i}">Вернуть пункт</button></div>`:""}
+        <div class="btns" style="justify-content:flex-end">${confirmBtn("delsec-"+s.id,"Удалить раздел","sec-del",`data-s="${i}"`)}</div>
+      </div></div></section>`;
+  });
+  h+=`<section class="card"><div class="pad"><div class="btns"><input class="in txt" id="new-sec" type="text" placeholder="Название нового раздела" style="min-width:200px"><button class="btn" data-act="sec-add">+ Новый раздел</button></div>
+    <p class="hint" style="margin-top:10px">Удалённые пункты не пропадают: их записи сохраняются, а сам пункт можно вернуть кнопкой «Вернуть пункт» в любом разделе.</p></div></section>
+    <div class="btns" style="justify-content:space-between;margin-top:6px">${confirmBtn("layout-reset","Вернуть стандартный порядок","layout-reset")}<button class="btn primary" data-act="edit-done">Готово</button></div>`;
   return h;
 }
 
@@ -519,13 +615,12 @@ function viewGrowth(){
   let engTotal=0,engWeek=0,knitTotal=0,controls=[],notes=[];
   const ws=weekStart(tk);
   for(const k of Object.keys(state.days).sort()){const d=state.days[k];const m=(d.eng&&d.eng.min)||0;engTotal+=m;if(k>=ws)engWeek+=m;knitTotal+=(d.knit&&d.knit.min)||0;if(d.write&&d.write.control)controls.push(k);
-    if((d.eng&&d.eng.note)||(d.course&&d.course.note)||(d.learn&&Object.values(d.learn).some(x=>x&&x.note)))notes.push(k)}
+    if((d.eng&&d.eng.note)||(d.course&&d.course.note)||(d.cx&&Object.values(d.cx).some(x=>x&&x.note)))notes.push(k)}
   const sc=scarfDone(),sLeft=Math.max(0,g.scarfLen-sc);
   let cm7=0,act7=0;for(let i=0;i<7;i++){const d=D(addDays(tk,-i));if(d.knit&&d.knit.cm){cm7+=d.knit.cm;act7++}}
   const pace=act7?cm7/act7:0;
   const sFinish=sLeft>0&&pace>0?forecastWorkdays(addDays(tk,1),Math.ceil(sLeft/pace)):null;
   const wish=state.settings.hobby.wish||[];
-  const learn=state.settings.learn||[];
   return `<div class="page-head"><div><h1>Развитие</h1><p class="lead">Планы, этапы и прогнозы. Отметки за день — на странице «Сегодня».</p></div></div>
   ${card({key:"gr-course",title:"Курс по бизнесу",body:`<div class="pad stats"><div class="st"><b>${cd}</b><span>из ${g.courseTotal} уроков</span>${bar(cd/g.courseTotal,"thick")}</div>
     <div class="st"><b>${left?fmtDM(finish):"✓"}</b><span>${left?`прогноз финиша · осталось ${left} ${plural(left,"урок","урока","уроков")}, ${g.coursePerDay} в день, вс — выходной`:"курс пройден"}</span></div></div>
@@ -538,16 +633,12 @@ function viewGrowth(){
     <div class="st"><b>${fmtN(knitTotal/60,1)}</b><span>ч вязания всего</span></div></div>
     ${stageItem("knit","План обучения")}
     ${item({key:"gr-knit-kit",label:"Инструменты",icon:IC.pen,sub:"спицы 7–8 мм, толстая однотонная светлая пряжа"})}`})}
-  ${card({key:"gr-learn",title:"Свои направления",extra:learn.length?String(learn.length):"",body:`${learn.map((l,i)=>item({key:"gl-"+l.id,label:esc(l.name),sub:l.archived?"на паузе — не показывается на «Сегодня»":"",val:`<b>${l.goal||0}</b> мин/день`,icon:IC.pen,
-      body:`${field("Название",txt(`s.learn.${i}.name`,"Название"))}${field("Минут в день",num(`s.learn.${i}.goal`,{cls:"sm",label:"Минут в день"}))}<div class="btns"><button class="btn ghost" data-act="learn-pause" data-i="${i}">${l.archived?"Вернуть на «Сегодня»":"Поставить на паузу"}</button>${confirmBtn("dellearn-"+l.id,"Удалить","learn-del",`data-i="${i}"`)}</div>`})).join("")}
-    <div class="pad"><p class="hint" style="margin-bottom:10px">Например, учёба в вузе. Новое направление появится в блоке «Обучение» и войдёт в процент дня.</p>
-    <div class="btns"><input class="in txt" id="learn-new" type="text" placeholder="Название" style="max-width:260px"><input class="in num sm" id="learn-goal" type="number" min="1" value="30" aria-label="Минут в день"><span class="unit">мин/день</span><button class="btn" data-act="learn-add">Добавить</button></div></div>`})}
   ${card({key:"gr-wish",title:"Хочу попробовать",extra:String(wish.length),body:`${wish.map(w=>`<div class="it"><div class="it-row" style="cursor:default"><span class="noti">${IC.pen}</span><span class="it-main"><span class="t">${esc(w.name)}</span></span><button class="x" data-act="wish-del" data-id="${w.id}" aria-label="Убрать">${IC.close}</button></div></div>`).join("")}
     <div class="pad"><div class="btns"><input class="in txt" id="wish-new" type="text" placeholder="Новое хобби" style="max-width:260px"><button class="btn" data-act="wish-add">Добавить</button></div>
     <p class="hint" style="margin-top:10px">Совет: не больше двух активных хобби. Новое бери, когда одно из текущих войдёт в привычку.</p></div>`})}
   ${notes.length?card({key:"gr-notes",title:"Итоги по обучению",def:true,extra:String(notes.length),body:notes.slice(-15).reverse().map(k=>{const d=state.days[k];const parts=[];
     if(d.eng&&d.eng.note)parts.push(`<div><b>Английский:</b> ${esc(d.eng.note)}</div>`);if(d.course&&d.course.note)parts.push(`<div><b>Курс:</b> ${esc(d.course.note)}</div>`);
-    if(d.learn)for(const id in d.learn){const l=(state.settings.learn||[]).find(x=>x.id===id);if(d.learn[id]&&d.learn[id].note)parts.push(`<div><b>${esc(l?l.name:"Направление")}:</b> ${esc(d.learn[id].note)}</div>`)}
+    if(d.cx)for(const id in d.cx){const l=state.settings.custom[id];if(d.cx[id]&&d.cx[id].note)parts.push(`<div><b>${esc(l?itemOpt(id).name:"Пункт")}:</b> ${esc(d.cx[id].note)}</div>`)}
     return `<div class="sumr" style="grid-template-columns:60px 1fr;align-items:start"><span class="muted small">${fmtShort(k)}</span><div class="small">${parts.join("")}</div></div>`}).join("")}):""}`;
 }
 
@@ -580,9 +671,9 @@ const legend=items=>`<div class="legend">${items.map(([n,c])=>`<span><i style="b
 function viewStats(){
   const tk=todayKey(),N={week:7,month:30,year:365}[ui.period];
   const dates=[];for(let i=N-1;i>=0;i--)dates.push(addDays(tk,-i));
-  const pick=f=>dates.map(k=>{const v=f(D(k));return v==null||v===""?null:v});
+  const pick=f=>dates.map(k=>{const v=f(D(k),k);return v==null||v===""?null:v});
   const weight=pick(d=>d.weight||null);
-  const sleepH=pick(d=>{const m=sleepDur(d.sleep);return m?Math.round(m/6)/10:null});
+  const sleepH=pick((d,k)=>{const m=sleepDurK(k);return m?Math.round(m/6)/10:null});
   const sleepQ=pick(d=>(d.sleep&&d.sleep.q)||null);
   const energy=pick(d=>(d.well&&d.well.energy)||null),mood=pick(d=>(d.well&&d.well.mood)||null);
   const names=allExNames();if(!ui.chartEx||!names.includes(ui.chartEx))ui.chartEx=names[0]||"";
@@ -613,7 +704,7 @@ function viewWeek(){
   const pcts=past.filter(hasData).map(k=>dayPct(k,cd).pct);
   const str=keys.filter(k=>dayType(k)==="strength"),car=keys.filter(k=>dayType(k)==="cardio");
   const strDone=str.filter(k=>strengthDone(D(k))).length,carDone=car.filter(k=>((D(k).train&&D(k).train.cardio)||0)>=g.cardio).length;
-  const sl=avg(keys.map(k=>sleepDur(D(k).sleep)));
+  const sl=avg(keys.map(k=>sleepDurK(k)));
   const wEnd=(()=>{let w=null;keys.forEach(k=>{if(D(k).weight)w=D(k).weight});return w})();
   const wPrevKey=lastWeightDay(ws);const wPrev=wPrevKey?state.days[wPrevKey].weight:null;
   const fmt=(v,d=0,u="")=>v==null?"—":fmtN(v,d)+(u?" "+u:"");
@@ -641,7 +732,7 @@ function viewWeek(){
       ["Научная",sp+" стр.",g.science*6+" стр.",okv(sp,g.science*6)],
       ["Английский",eng+" мин",g.eng*6+" мин",okv(eng,g.eng*6)],
       ["Курс по бизнесу",crs+" ур.",g.coursePerDay*6+" ур.",okv(crs,g.coursePerDay*6)],
-      ...learnList().map(l=>{const m=sum(d=>d.learn&&d.learn[l.id]&&d.learn[l.id].min);return [esc(l.name),m+" мин",(l.goal||0)*6+" мин",okv(m,(l.goal||0)*6)]})])
+      ...Object.keys(state.settings.custom).filter(id=>state.settings.custom[id].type==="num"&&L().some(x=>x.items.includes(id))).map(id=>{const def=state.settings.custom[id];const m=keys.reduce((a,k)=>a+(Number(cxVal(D(k),id))||0),0);return [esc(itemOpt(id).name),fmtN(m,1)+" "+esc(def.unit||""),fmtN((def.goal||0)*6)+" "+esc(def.unit||""),okv(m,(def.goal||0)*6)]})])
     +sec("Хобби",[
       ["Вязание",`${km} мин · ${fmtN(kc,1)} см`,g.knit*6+" мин",okv(km,g.knit*6)],
       ["Письмо левой рукой",wr+" "+plural(wr,"сессия","сессии","сессий"),"18 сессий",okv(wr,18)]])
@@ -726,10 +817,21 @@ function applyTheme(){const th=lsGet("ritm-theme","auto");if(th==="auto")delete 
 function setTheme(v){lsSet("ritm-theme",v);applyTheme();render()}
 
 /* ---------- events ---------- */
-document.addEventListener("input",e=>{const el=e.target;if(el.dataset.bind&&el.type!=="checkbox"){setV(el.dataset.bind,readInput(el))}});
+function editField(el){
+  const S=state.settings;
+  if(el.dataset.secTitle!=null){L()[Number(el.dataset.secTitle)].title=el.value||"Без названия";markDirty("profile");return true}
+  if(el.dataset.iname){const id=el.dataset.iname,v=el.value.trim();if(S.custom[id]){S.custom[id].name=v||"Без названия"}else{S.itemOpts[id]={...(S.itemOpts[id]||{})};if(v&&v!==BI[id].name)S.itemOpts[id].name=v;else delete S.itemOpts[id].name}markDirty("profile");return true}
+  if(el.dataset.cxgoal){S.custom[el.dataset.cxgoal].goal=Math.max(0,Number(el.value)||0);markDirty("profile");return true}
+  if(el.dataset.cxunit){S.custom[el.dataset.cxunit].unit=el.value.trim();markDirty("profile");return true}
+  if(el.dataset.iopt){const id=el.dataset.iopt;S.itemOpts[id]={...(S.itemOpts[id]||{}),[el.dataset.key]:el.checked};markDirty("profile");return true}
+  if(el.dataset.imove){const id=el.dataset.imove,from=L()[Number(el.dataset.s)],to=L()[Number(el.value)];from.items=from.items.filter(x=>x!==id);to.items.push(id);markDirty("profile");return true}
+  return false;
+}
+document.addEventListener("input",e=>{const el=e.target;if(el.dataset.bind&&el.type!=="checkbox"){setV(el.dataset.bind,readInput(el));return}if(el.type!=="checkbox"&&el.tagName!=="SELECT")editField(el)});
 document.addEventListener("change",e=>{
   const el=e.target;
   if(el.dataset.bind){setV(el.dataset.bind,readInput(el));renderSoon();return}
+  if(editField(el)){renderSoon();return}
   if(el.dataset.reading){setReading(el.dataset.reading,readInput(el),el.dataset.book);renderSoon();return}
   if(el.dataset.readingBook){const t=el.dataset.readingBook,d=ensureDay(ui.date);d.read=d.read||{};d.read[t]=d.read[t]||{};d.read[t].book=el.value;markDirty("day",ui.date);renderSoon();return}
   if(el.dataset.bookStatus){const b=state.books[el.dataset.bookStatus];b.status=el.value;if(el.value==="done"){b.finished=b.finished||todayKey();if(b.total)b.cur=b.total}else b.finished=null;markDirty("book",b.id);renderSoon();return}
@@ -748,7 +850,7 @@ document.addEventListener("click",async e=>{
   const act=a.dataset.act,k=ui.date;
   const day=()=>ensureDay(k);
   switch(act){
-    case "nav":ui.view=a.dataset.view;if(a.dataset.tab)ui.libTab=a.dataset.tab;ui.confirm=null;ui.msg=null;render();window.scrollTo(0,0);return;
+    case "nav":ui.view=a.dataset.view;ui.edit=false;if(a.dataset.tab)ui.libTab=a.dataset.tab;ui.confirm=null;ui.msg=null;render();window.scrollTo(0,0);return;
     case "toggle":{const key=a.dataset.key;ui.open.has(key)?ui.open.delete(key):ui.open.add(key);break}
     case "collapse":{const key=a.dataset.key;ui.cards[key]=!isCollapsed(key,a.dataset.def==="1");saveUi();break}
     case "day-prev":ui.date=addDays(k,-1);break;
@@ -762,7 +864,7 @@ document.addEventListener("click",async e=>{
     case "setv":setV(a.dataset.bind,Number(a.dataset.n));break;
     case "toggle-bool":setV(a.dataset.bind,!getV(a.dataset.bind));break;
     case "read-fill":{const t=a.dataset.type,goal=Number(a.dataset.goal),cur=(D(k).read&&D(k).read[t]&&D(k).read[t].pages)||0;setReading(t,cur>=goal?0:goal,a.dataset.book);break}
-    case "open-weight":ui.cards.body=false;ui.open.add("weight");ui.scrollTo="it-weight";ui.focus="d.weight";break;
+    case "open-weight":{const sec=L().find(x=>x.items.includes("weight"));if(sec)ui.cards["sec-"+sec.id]=false}ui.open.add("weight");ui.scrollTo="it-weight";ui.focus="d.weight";break;
     case "ex-add":{const d=day();d.train=d.train||{};d.train.ex=d.train.ex||[];d.train.ex.push({name:"",sets:[{r:null,w:null}]});ui.focus=`d.train.ex.${d.train.ex.length-1}.name`;markDirty("day",k);break}
     case "ex-del":{const d=day();d.train.ex.splice(Number(a.dataset.i),1);markDirty("day",k);break}
     case "set-add":{const d=day(),ex=d.train.ex[Number(a.dataset.i)];ex.sets=ex.sets||[];const last=ex.sets[ex.sets.length-1];ex.sets.push({r:last?last.r:null,w:last?last.w:null});markDirty("day",k);break}
@@ -781,9 +883,19 @@ document.addEventListener("click",async e=>{
     case "stage":{state.settings.hobby[a.dataset.kind]=Number(a.dataset.i);markDirty("profile");break}
     case "wish-add":{const n=$("#wish-new").value.trim();if(!n)return;state.settings.hobby.wish.push({id:"w"+Date.now(),name:n});markDirty("profile");break}
     case "wish-del":{state.settings.hobby.wish=state.settings.hobby.wish.filter(x=>x.id!==a.dataset.id);markDirty("profile");break}
-    case "learn-add":{const n=$("#learn-new").value.trim();if(!n){$("#learn-new").focus();return}const gl=Math.max(1,Number($("#learn-goal").value)||30);state.settings.learn=state.settings.learn||[];state.settings.learn.push({id:"l"+Date.now(),name:n,goal:gl});markDirty("profile");break}
-    case "learn-pause":{const l=state.settings.learn[Number(a.dataset.i)];l.archived=!l.archived;markDirty("profile");break}
-    case "learn-del":{state.settings.learn.splice(Number(a.dataset.i),1);ui.confirm=null;markDirty("profile");break}
+    case "now":setV(a.dataset.bind,nowHM());break;
+    case "bed-now":{const now=new Date(),tk=todayKey();const dk=now.getHours()<5&&ui.date===tk?addDays(tk,-1):ui.date;const dd=ensureDay(dk);dd.night=dd.night||{};dd.night.bed=nowHM();markDirty("day",dk);break}
+    case "edit-on":ui.edit=true;ui.confirm=null;render();window.scrollTo(0,0);return;
+    case "edit-done":ui.edit=false;ui.confirm=null;render();window.scrollTo(0,0);return;
+    case "sec-move":{const i=Number(a.dataset.s),j=i+Number(a.dataset.d),lay=L();if(j<0||j>=lay.length)return;[lay[i],lay[j]]=[lay[j],lay[i]];markDirty("profile");break}
+    case "item-move":{const it=L()[Number(a.dataset.s)].items,i=Number(a.dataset.j),j=i+Number(a.dataset.d);if(j<0||j>=it.length)return;[it[i],it[j]]=[it[j],it[i]];markDirty("profile");break}
+    case "item-hide":{L()[Number(a.dataset.s)].items.splice(Number(a.dataset.j),1);markDirty("profile");break}
+    case "item-add":{const i=Number(a.dataset.s),n=$("#nn-"+i).value.trim();if(!n){$("#nn-"+i).focus();return}const type=$("#nt-"+i).value,id="c"+Date.now().toString(36);
+      state.settings.custom[id]={type,name:n,...(type==="num"?{goal:30,unit:"мин"}:{})};L()[i].items.push(id);ui.focus="in-"+id;markDirty("profile");break}
+    case "item-restore":{const i=Number(a.dataset.s),id=$("#nh-"+i).value;if(!id)return;L()[i].items.push(id);markDirty("profile");break}
+    case "sec-add":{const n=$("#new-sec").value.trim();if(!n){$("#new-sec").focus();return}L().push({id:"s"+Date.now().toString(36),title:n,items:[]});markDirty("profile");break}
+    case "sec-del":{L().splice(Number(a.dataset.s),1);ui.confirm=null;markDirty("profile");break}
+    case "layout-reset":{state.settings.layout=clone(DEFAULT_LAYOUT);const used=new Set(DEFAULT_LAYOUT.flatMap(x=>x.items));Object.keys(state.settings.custom).forEach(id=>{if(!used.has(id))state.settings.layout[state.settings.layout.length-1].items.push(id)});state.settings.itemOpts={};ui.confirm=null;markDirty("profile");break}
     case "period":ui.period=a.dataset.p;break;
     case "cal-prev":case "cal-next":{const[y,m]=ui.calMonth.split("-").map(Number);const d=new Date(y,m-1+(act==="cal-next"?1:-1),1);ui.calMonth=`${d.getFullYear()}-${pad(d.getMonth()+1)}`;break}
     case "week-prev":ui.week=addDays(ui.week,-7);break;
@@ -798,7 +910,7 @@ document.addEventListener("click",async e=>{
     case "import-apply":{const p=ui.pendingImport;const now=Date.now();
       const oldBooks=Object.keys(state.books);
       state={settings:mergeSettings(p.settings),days:p.days||{},books:p.books||{}};seed();
-      state.settings._u=now;Object.values(state.days).forEach(d=>{d._u=now});Object.values(state.books).forEach(b=>{b._u=now});
+      migrateDays();state.settings._u=now;Object.values(state.days).forEach(d=>{d._u=now});Object.values(state.books).forEach(b=>{b._u=now});
       oldBooks.forEach(id=>{if(!state.books[id])state.books[id]={id,_del:true,_u:now}});
       ui.pendingImport=null;ui.msg={k:"data",t:"Данные загружены."};saveLocal(true);Sync.schedule(100);break}
     case "sync-connect":{const t=($("#sync-token").value||"").trim();if(!t){$("#sync-token").focus();return}a.disabled=true;a.textContent="Подключаю…";await Sync.connect(t);break}
