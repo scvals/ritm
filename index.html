@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ритм</title>
+<meta name="description" content="Личный трекер рутины, тренировок, чтения, обучения и хобби">
+<meta name="theme-color" content="#ECEBE6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Ритм">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Manrope:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script>try{var t=localStorage.getItem("ritm-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+<div class="app">
+  <aside class="side" aria-label="Разделы">
+    <div class="brand">Ритм<small>Личный трекер</small></div>
+    <nav class="navl" id="navlist"></nav>
+    <div class="side-foot">
+      <button class="sync" data-act="nav" data-view="settings"><i></i><span>…</span></button>
+      <button class="navb" data-act="theme-cycle" id="themeBtn"></button>
+    </div>
+  </aside>
+  <header class="topbar">
+    <div class="brand">Ритм</div>
+    <div class="acts">
+      <button class="sync" data-act="nav" data-view="settings" aria-label="Синхронизация"><i></i><span></span></button>
+      <button class="ib" data-act="theme-cycle" id="themeBtnM"></button>
+      <button class="ib" data-act="nav" data-view="settings" id="setBtnM" aria-label="Настройки"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>
+    </div>
+  </header>
+  <main id="main"></main>
+  <nav class="tabbar" id="tabbar" aria-label="Разделы"></nav>
+</div>
+<datalist id="exnames"></datalist>
+<input type="file" id="importFile" accept=".json,application/json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
