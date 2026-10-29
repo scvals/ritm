@@ -1,6 +1,6 @@
 // Ритм — service worker: офлайн-работа и установка как приложение.
-const CACHE = "ritm-v4";
-const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest",
+const CACHE = "ritm-v5";
+const SHELL = ["./", "index.html", "style.css", "app.js", "guides.js", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {

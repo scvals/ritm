@@ -47,6 +47,9 @@ const IC={
   moon:svg('<path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/>'),
   sun:svg('<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>'),
   auto:svg('<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>'),
+  spark:svg('<path d="M12 3.5l1.7 4.8 4.8 1.7-4.8 1.7L12 16.5l-1.7-4.8L5.5 10l4.8-1.7z"/><path d="M18.5 15.5l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z"/>'),
+  assist:svg('<path d="M12 3.5l1.7 4.8 4.8 1.7-4.8 1.7L12 16.5l-1.7-4.8L5.5 10l4.8-1.7z"/><path d="M18.5 15.5l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z"/>'),
+  chat:svg('<path d="M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H10l-4 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V7A1.5 1.5 0 0 1 5 5.5z"/>'),
   scale:svg('<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M9 9.5a4 4 0 0 1 6 0l-2 2.5"/>')
 };
 
@@ -97,7 +100,7 @@ let state={settings:clone(DEFAULTS),days:{},books:{}};
 const G=()=>state.settings.goals;
 const uiPrefs=(()=>{try{return JSON.parse(lsGet("ritm-ui","{}"))||{}}catch(e){return{}}})();
 const ui={view:"today",date:todayKey(),open:new Set(),cards:uiPrefs.cards||{},libTab:"f",period:"month",calMonth:todayKey().slice(0,7),
-  week:weekStart(todayKey()),chartEx:"",confirm:null,pendingImport:null,focus:null,scrollTo:null,msg:null};
+  week:weekStart(todayKey()),chartEx:"",confirm:null,guide:new Set(),aiItem:null,aiBusy:false,aiErr:null,aiDraft:"",pendingImport:null,focus:null,scrollTo:null,msg:null};
 function saveUi(){lsSet("ritm-ui",JSON.stringify({cards:ui.cards}))}
 
 function mergeSettings(s){
@@ -115,10 +118,12 @@ function mergeSettings(s){
   out.learn=[];
   out.weekNotes=s.weekNotes||{};
   out.created=s.created||null;
+  if(typeof s.aiAbout==="string")out.aiAbout=s.aiAbout;
   out._u=s._u||0;
   return out;
 }
 function seed(){
+  if(state.settings.aiAbout==null)state.settings.aiAbout=DEFAULT_ABOUT;
   if(!state.settings.layout)state.settings.layout=clone(DEFAULT_LAYOUT);
   state.settings.custom=state.settings.custom||{};state.settings.itemOpts=state.settings.itemOpts||{};
   if(!state.settings.created)state.settings.created=todayKey();
@@ -383,25 +388,43 @@ function card({key,title,cnt=null,tag="",body,def=false,extra=""}){
   return `<section class="card ${col?"collapsed":""}" id="card-${key}"><header class="card-h" data-act="collapse" data-key="${key}" data-def="${def?1:0}" role="button" tabindex="0" aria-expanded="${!col}"><h2>${title}</h2>${tag?`<span class="tag">${tag}</span>`:""}${c}<span class="chev">${IC.chev}</span></header>${col?"":`<div class="card-b">${body}</div>`}</section>`;
 }
 /* Item = one row. Variants: check (checkbox), expandable (body), with progress dot */
+/* Подсказки: наставление дня + методика + кнопка ИИ */
+let CUR_ITEM=null;
+const dayNum=k=>Math.floor(parseKey(k).getTime()/86400000);
+const strHash=s=>{let h=0;for(const ch of String(s))h=(h*31+ch.charCodeAt(0))|0;return Math.abs(h)};
+const pickQ=(arr,seed)=>arr&&arr.length?arr[(dayNum(ui.date)+strHash(seed))%arr.length]:"";
+function guideKey(id,c){if(id==="train")return c.rest?null:(c.t==="cardio"?"cardio":"train");if(/^write-s\d$/.test(id))return "write";return GUIDES[id]?id:null}
+function guideHtml(g){
+  return `<div class="guide"><ol>${g.how.map(x=>`<li>${esc(x)}</li>`).join("")}</ol>
+    ${g.err&&g.err.length?`<p class="gh">Частые ошибки</p><ul>${g.err.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:""}
+    ${g.min?`<p class="gmin"><b>Минимум на тяжёлый день:</b> ${esc(g.min)}</p>`:""}</div>`;
+}
 function item(o){
+  const gid=o.gid!==undefined?o.gid:(CUR_ITEM&&CUR_ITEM.gid),aiId=o.aiId!==undefined?o.aiId:(CUR_ITEM&&CUR_ITEM.aiId);
+  const g=gid?guideFor(gid):null,ai=!!aiId&&AI.on(),extra=!!(g||ai);
+  const key=o.key||("ck-"+o.check);
+  const gopen=ui.guide.has(key);
+  const qline=g?`<div class="gq">${esc(pickQ(g.q,gid))}</div>`:"";
+  const gbar=extra?`<div class="gbar">${g?`<button class="chip ghost" data-act="guide" data-key="${key}" aria-expanded="${gopen}">${IC.spark}<span>${gopen?"Скрыть методику":"Как делать"}</span></button>`:""}${ai?`<button class="chip ghost" data-act="ask-ai" data-item="${aiId}">${IC.chat}<span>Спросить ИИ</span></button>`:""}</div>${gopen&&g?guideHtml(g):""}`:"";
   if(o.check){
-    const v=!!getV(o.check);
-    return `<div class="it ${v?"done":""}"><label class="it-row"><input type="checkbox" class="dot-in" data-bind="${o.check}" data-k="${o.check}" ${v?"checked":""}><span class="it-main"><span class="t">${o.label}</span>${o.sub?`<span class="s">${o.sub}</span>`:""}</span>${o.val?`<span class="it-val">${o.val}</span>`:""}</label></div>`;
+    const v=!!getV(o.check),open=extra&&ui.open.has(key);
+    return `<div class="it ${v?"done":""} ${open?"open":""}" id="it-${key.replace(/\./g,"-")}"><div class="it-row ck"><label class="ck-l"><input type="checkbox" class="dot-in" data-bind="${o.check}" data-k="${o.check}" ${v?"checked":""}><span class="it-main"><span class="t">${o.label}</span>${o.sub?`<span class="s">${o.sub}</span>`:""}</span>${o.val?`<span class="it-val">${o.val}</span>`:""}</label>${extra?`<button class="chev-b" data-act="toggle" data-key="${key}" aria-expanded="${open}" aria-label="Подробнее">${IC.chev}</button>`:""}</div>${open?`<div class="it-body">${qline}${gbar}</div>`:""}</div>`;
   }
-  const open=!!o.body&&ui.open.has(o.key);
+  const body=o.body||extra?`${qline}${o.body||""}${gbar}`:"";
+  const open=!!body&&ui.open.has(o.key);
   const done=!!o.done,p=done?100:Math.round(clamp01(o.p)*100);
   let lead;
   if(o.icon)lead=`<span class="noti">${o.icon}</span>`;
   else if(o.dotAct)lead=`<button class="dot ${done?"on":""}" style="--p:${p}" data-act="${o.dotAct.act}" ${o.dotAct.attrs||""} aria-label="${done?"Сбросить":"Отметить по норме"}" title="${done?"Сбросить":"Отметить по норме"}"></button>`;
   else lead=`<span class="dot ro ${done?"on":""}" style="--p:${p}"></span>`;
-  const rowAttrs=o.body?`data-act="toggle" data-key="${o.key}" role="button" tabindex="0" aria-expanded="${open}"`:"";
-  return `<div class="it ${open?"open":""} ${done?"done":""}" id="it-${o.key}"><div class="it-row" ${rowAttrs}>${lead}<span class="it-main"><span class="t">${o.label}</span>${o.sub?`<span class="s ${o.warn?"warn":""}">${o.sub}</span>`:""}</span>${o.val?`<span class="it-val">${o.val}</span>`:""}${o.quick||""}${o.body?`<span class="chev">${IC.chev}</span>`:""}</div>${open?`<div class="it-body">${o.body}</div>`:""}</div>`;
+  const rowAttrs=body?`data-act="toggle" data-key="${o.key}" role="button" tabindex="0" aria-expanded="${open}"`:"";
+  return `<div class="it ${open?"open":""} ${done?"done":""}" id="it-${o.key}"><div class="it-row" ${rowAttrs}>${lead}<span class="it-main"><span class="t">${o.label}</span>${o.sub?`<span class="s ${o.warn?"warn":""}">${o.sub}</span>`:""}</span>${o.val?`<span class="it-val">${o.val}</span>`:""}${o.quick||""}${body?`<span class="chev">${IC.chev}</span>`:""}</div>${open?`<div class="it-body">${body}</div>`:""}</div>`;
 }
 const fillDot=(bind,goal)=>({act:"fill",attrs:`data-bind="${bind}" data-goal="${goal}"`});
 const valOf=(cur,goal,unit)=>`<b>${fmtN(cur,1)}</b> / ${goal} ${unit}`;
 
 /* ---------- views ---------- */
-const VIEWS=[["today","Сегодня"],["library","Книги"],["growth","Развитие"],["stats","Статистика"],["week","Неделя"],["settings","Настройки"]];
+const VIEWS=[["today","Сегодня"],["library","Книги"],["growth","Развитие"],["stats","Статистика"],["week","Неделя"],["assist","Помощник"],["settings","Настройки"]];
 
 function renderItem(id,o,c){
   const {k,d,g,t}=c,lab=esc(o.name);
@@ -504,13 +527,12 @@ function viewToday(){
   if(ui.edit)return viewEdit();
   const k=ui.date,d=D(k),g=G(),t=dayType(k),rest=t==="rest",isToday=k===todayKey();
   const cd=courseDone(),c=mkCtx(k,cd),items=dayItems(k,cd),P=dayPct(k,cd);
-  const titles={strength:"Силовая тренировка",cardio:"Кардио: ходьба",rest:"День отдыха"};
-  const subs={strength:"Полный день",cardio:"Полный день",rest:"Обязательна только базовая рутина"};
   const C=2*Math.PI*38;
-  let h=`<div class="today-head"><div>
+  const dq=DAY_QUOTES[dayNum(k)%DAY_QUOTES.length];
+  let h=`<div class="today-head"><div class="th-l">
     <div class="date-nav"><button class="ib flip" data-act="day-prev" aria-label="Предыдущий день">${IC.chev}</button><span class="date-l">${fmtLong(k)}</span><button class="ib" data-act="day-next" aria-label="Следующий день">${IC.chev}</button>${isToday?"":`<button class="back" data-act="day-today">к сегодня</button>`}</div>
-    <h1>${titles[t]}</h1><p class="lead">${subs[t]} · выполнено ${P.done} из ${P.total}</p></div>
-    <div class="ring" role="img" aria-label="Выполнено ${P.pct}%"><svg viewBox="0 0 84 84"><circle class="tr" cx="42" cy="42" r="38"/><circle class="pr" cx="42" cy="42" r="38" stroke-dasharray="${C}" stroke-dashoffset="${C*(1-P.pct/100)}"/></svg><div class="rv"><b>${P.pct}%</b><span>дня</span></div></div></div>`;
+    <p class="dq">${esc(dq)}</p></div>
+    <div class="ring" role="img" aria-label="Выполнено ${P.pct}%: ${P.done} из ${P.total}"><svg viewBox="0 0 84 84"><circle class="tr" cx="42" cy="42" r="38"/><circle class="pr" cx="42" cy="42" r="38" stroke-dasharray="${C}" stroke-dashoffset="${C*(1-P.pct/100)}"/></svg><div class="rv"><b>${P.pct}%</b><span>${P.done} из ${P.total}</span></div></div></div>`;
 
   if(isToday){
     const due=state.settings.tasks.filter(x=>diffDays(x.last||k,k)>=x.every);
@@ -525,7 +547,7 @@ function viewToday(){
     const opts=s.items.map(itemOpt).filter(Boolean);
     const allOpt=rest&&opts.length>0&&opts.every(o=>o.restOpt||!o.counts);
     const cnt=groupCount(items,s.id);
-    const body=opts.map(o=>renderItem(o.id,o,c)).join("")||`<div class="pad empty">Пусто. Нажми «Настроить разделы» внизу, чтобы добавить пункты.</div>`;
+    const body=opts.map(o=>{CUR_ITEM={gid:guideKey(o.id,c),aiId:o.id};const x=renderItem(o.id,o,c);CUR_ITEM=null;return x}).join("")||`<div class="pad empty">Пусто. Нажми «Настроить разделы» внизу, чтобы добавить пункты.</div>`;
     h+=card({key:(allOpt?"rest-":"")+"sec-"+s.id,title:esc(s.title),cnt:allOpt?null:cnt,tag:allOpt?"по желанию":"",def:allOpt,body});
   }
   h+=`<div class="btns" style="justify-content:center;margin-top:18px"><button class="btn ghost" data-act="edit-on">${IC.pen}<span>Настроить разделы и пункты</span></button></div>`;
@@ -768,6 +790,7 @@ function viewSettings(){
       ${Sync.msg?`<div class="notice err">${esc(Sync.msg)}</div>`:""}</div>`;
   return `<div class="page-head"><div><h1>Настройки</h1></div></div>
   ${card({key:"set-sync",title:"Облачная синхронизация",extra:Sync.on()?"включена":"выключена",body:syncBody})}
+  ${aiSettingsCard()}
   ${card({key:"set-theme",title:"Оформление",body:`<div class="pad"><div class="seg" role="group">${[["light","Светлая"],["dark","Тёмная"],["auto","Как в системе"]].map(([v,l])=>`<button data-act="theme" data-v="${v}" aria-pressed="${th===v}">${l}</button>`).join("")}</div></div>`})}
   ${card({key:"set-goals",title:"Нормы",body:GOAL_FIELDS.map(([title,fs])=>item({key:"goal-"+title,label:title,icon:IC.pen,
       sub:fs.slice(0,3).map(([k,l,u])=>`${l.toLowerCase()} ${g[k]}${u?" "+u:""}`).join(" · "),
@@ -782,12 +805,151 @@ function viewSettings(){
     ${ui.msg&&ui.msg.k==="data"?`<div class="notice">${esc(ui.msg.t)}</div>`:""}</div>`})}`;
 }
 
+/* ---------- ИИ-помощник ---------- */
+const AI_PROVIDERS={
+  anthropic:{name:"Claude (Anthropic)",model:"claude-haiku-5-5",keyUrl:"https://console.anthropic.com/settings/keys",ph:"sk-ant-…",note:"Ключ создаётся в консоли Anthropic, оплата по факту использования — несколько центов в месяц при таком использовании."},
+  gemini:{name:"Gemini (Google)",model:"gemini-flash-latest",keyUrl:"https://aistudio.google.com/apikey",ph:"AIza…",note:"Есть бесплатный лимит запросов. Ключ создаётся в Google AI Studio."},
+  openrouter:{name:"OpenRouter",model:"openrouter/auto",keyUrl:"https://openrouter.ai/keys",ph:"sk-or-…",note:"Один ключ — доступ к разным моделям, включая бесплатные (с пометкой «:free» в названии)."},
+  openai:{name:"Другой (совместимый с OpenAI)",model:"",keyUrl:"",ph:"ключ",note:"Укажи адрес API (заканчивается на /v1) и название модели."}
+};
+const DEFAULT_ABOUT="Мужчина, 21 год, рост 180 см, вес около 93 кг. Цель — снижение веса без потери мышечной массы. Режим: Пн/Ср/Пт — силовая, Вт/Чт/Сб — ходьба на беговой дорожке 50–60 мин, Вс — отдых. Учу английский с нуля, прохожу курс по бизнесу, учусь писать левой рукой и вязать.";
+const AI={
+  cfg:null,
+  load(){try{this.cfg=JSON.parse(lsGet("ritm-ai","null"))}catch(e){this.cfg=null}},
+  save(){if(this.cfg)lsSet("ritm-ai",JSON.stringify(this.cfg));else{try{localStorage.removeItem("ritm-ai")}catch(e){}}},
+  on(){return !!(this.cfg&&this.cfg.key)},
+  async ask(system,messages){
+    const c=this.cfg,P=c.provider,model=c.model||AI_PROVIDERS[P].model;
+    let r,j;
+    if(P==="anthropic"){
+      r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":c.key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model,max_tokens:900,system,messages:messages.map(m=>({role:m.role,content:m.text}))})});
+      j=await r.json().catch(()=>({}));if(!r.ok)throw aiErr(r.status,j.error&&j.error.message);
+      return (j.content||[]).filter(x=>x.type==="text").map(x=>x.text).join("\n");
+    }
+    if(P==="gemini"){
+      r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{method:"POST",headers:{"content-type":"application/json","x-goog-api-key":c.key},
+        body:JSON.stringify({systemInstruction:{parts:[{text:system}]},contents:messages.map(m=>({role:m.role==="assistant"?"model":"user",parts:[{text:m.text}]})),generationConfig:{maxOutputTokens:1200}})});
+      j=await r.json().catch(()=>({}));if(!r.ok)throw aiErr(r.status,j.error&&j.error.message);
+      return ((j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts)||[]).map(x=>x.text||"").join("");
+    }
+    const base=(P==="openrouter"?"https://openrouter.ai/api/v1":(c.base||"")).replace(/\/+$/,"");
+    if(!base)throw aiErr(0,"Не указан адрес API");
+    r=await fetch(base+"/chat/completions",{method:"POST",headers:{"content-type":"application/json","authorization":"Bearer "+c.key,...(P==="openrouter"?{"X-Title":"Ritm tracker"}:{})},
+      body:JSON.stringify({model,max_tokens:900,messages:[{role:"system",content:system},...messages.map(m=>({role:m.role,content:m.text}))]})});
+    j=await r.json().catch(()=>({}));if(!r.ok)throw aiErr(r.status,j.error&&(j.error.message||j.error));
+    return (j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||"";
+  }
+};
+function aiErr(st,msg){const e=new Error(msg||"Ошибка");e.status=st;return e}
+function aiErrText(e){
+  if(e.status===401||e.status===403)return "Ключ не подошёл или у него нет доступа. Проверь его в настройках помощника.";
+  if(e.status===429)return "Слишком много запросов или закончился лимит. Попробуй чуть позже.";
+  if(e.status===400&&/location|region|country/i.test(e.message||""))return "Этот сервис недоступен в твоём регионе. Попробуй другого провайдера в настройках.";
+  if(e.status===404)return "Модель не найдена. Проверь её название в настройках помощника.";
+  if(!e.status)return navigator.onLine?`Не получилось связаться с сервисом${e.message&&e.message!=="Failed to fetch"?": "+e.message:""}.`:"Нет интернета.";
+  return `Ошибка ${e.status}${e.message?": "+e.message:""}`;
+}
+function itemNowText(id,c){
+  const d=c.d,g=c.g,v=x=>x==null||x===""?"не внесено":x;
+  const m={wake:`подъём ${v(d.sleep&&d.sleep.wake)} (цель ${g.wake})`,sleep:`отбой ${v(d.night&&d.night.bed)} (цель ${g.bedFrom}–${g.bedTo})`,
+    water:`${d.water||0} из ${g.water} мл`,food:`${(d.food&&d.food.kcal)||0} из ${g.kcal} ккал, белок ${(d.food&&d.food.protein)||0} из ${g.protein} г`,
+    walk:`${d.walk||0} из ${g.walk}–${g.walkMax} мин`,med:`${d.med||0} из ${g.med} мин`,silence:`${d.silence||0} из ${g.silence} мин`,
+    "read-f":`${(d.read&&d.read.f&&d.read.f.pages)||0} из ${g.fiction} стр.`,"read-s":`${(d.read&&d.read.s&&d.read.s.pages)||0} из ${g.science} стр.`,
+    eng:`${(d.eng&&d.eng.min)||0} из ${g.eng} мин; этап: ${(PLANS.eng[state.settings.hobby.eng]||PLANS.eng[0])[0]}`,
+    course:`${(d.course&&d.course.n)||0} из ${g.coursePerDay} уроков; всего пройдено ${c.cd} из ${g.courseTotal}`,
+    knit:`${(d.knit&&d.knit.min)||0} из ${g.knit} мин; шарф ${scarfDone()} из ${g.scarfLen} см; этап: ${(PLANS.knit[state.settings.hobby.knit]||PLANS.knit[0])[0]}`,
+    train:c.t==="strength"?`силовая; упражнения: ${((d.train&&d.train.ex)||[]).map(e=>`${e.name||"?"} ${(e.sets||[]).map(s=>`${s.r||"?"}×${s.w||"?"}кг`).join(", ")}`).join("; ")||"пока не записаны"}`:c.t==="cardio"?`кардио ${(d.train&&d.train.cardio)||0} из ${g.cardio}–${g.cardioMax} мин`:"сегодня день отдыха",
+    weight:`${d.weight||"не внесён"} кг`};
+  if(/^write/.test(id))return `этап письма левой рукой: ${(PLANS.write[state.settings.hobby.write]||PLANS.write[0])[0]}; сессии ${g.w1}/${g.w2}/${g.w3} мин`;
+  if(m[id])return m[id];
+  const def=state.settings.custom[id];if(def){const x=cxVal(d,id);return def.type==="num"?`${x||0} из ${def.goal||0} ${def.unit||""}`:(x?"отмечено":"не отмечено")}
+  const st=itemStatus(id,c);return st==null?"":(st?"выполнено":"не выполнено");
+}
+function aiSystem(id){
+  const c=mkCtx(ui.date),o=itemOpt(id),gk=guideKey(id,c),g=gk?guideFor(gk):null,P=dayPct(ui.date),lw=lastWeightDay();
+  const sec=L().find(s=>s.items.includes(id));
+  return `Ты — личный помощник в трекере привычек «Ритм». Отвечай по-русски, тепло и по делу.
+Формат: коротко (обычно 80–180 слов), без длинных вступлений; используй короткий нумерованный список шагов, при необходимости 1–2 строки «Важно». Давай конкретику: время, количество, порядок действий. Учитывай данные пользователя и сегодняшний прогресс.
+Не ставь диагнозов; при боли, травме или проблемах со здоровьем советуй обратиться к врачу.
+О пользователе: ${state.settings.aiAbout||DEFAULT_ABOUT}${lw?` Последний вес: ${state.days[lw].weight} кг (${fmtDM(lw)}).`:""}
+Нормы: вода ${G().water} мл, ${G().kcal} ккал, белок ${G().protein} г, сон ${G().sleepMin}–${G().sleepMax} ч, отбой ${G().bedFrom}–${G().bedTo}, подъём ${G().wake}.
+Сегодня: ${fmtLong(ui.date)}, ${({strength:"день силовой тренировки",cardio:"день кардио",rest:"день отдыха"})[c.t]}. Выполнено пунктов: ${P.done} из ${P.total} (${P.pct}%).
+Пункт трекера: «${o?o.name:id}»${sec?` (раздел «${sec.title}»)`:""}. Сейчас: ${itemNowText(id,c)||"нет данных"}.
+${g?`Базовая методика из трекера (опирайся на неё, но адаптируй под человека и ситуацию): ${g.how.join(" ")}`:""}`;
+}
+const AI_QUICK=[["Как лучше сделать сегодня","Как лучше выполнить этот пункт сегодня? Дай конкретную стратегию с учётом моего прогресса."],["Нет сил — как начать","У меня нет сил и мотивации. Как начать этот пункт прямо сейчас с минимальными усилиями?"],["Как усложнить","У меня уже получается. Как усложнить или прокачать этот пункт дальше?"],["Частые ошибки","Какие частые ошибки в этом пункте и как их избежать?"]];
+function mdLite(t){
+  const lines=esc(t).replace(/\*\*(.+?)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<i>$2</i>").split(/\n/);
+  let h="",list=null;
+  const close=()=>{if(list){h+=`</${list}>`;list=null}};
+  for(let ln of lines){
+    const mo=ln.match(/^\s*(\d+)[.)]\s+(.*)/),mu=ln.match(/^\s*[-•*]\s+(.*)/),mh=ln.match(/^\s*#{1,4}\s+(.*)/);
+    if(mo){if(list!=="ol"){close();h+="<ol>";list="ol"}h+=`<li>${mo[2]}</li>`}
+    else if(mu){if(list!=="ul"){close();h+="<ul>";list="ul"}h+=`<li>${mu[1]}</li>`}
+    else{close();if(mh)h+=`<p><b>${mh[1]}</b></p>`;else if(ln.trim())h+=`<p>${ln}</p>`}
+  }
+  close();return h;
+}
+const chats=(()=>{try{return JSON.parse(lsGet("ritm-chat","{}"))||{}}catch(e){return{}}})();
+function saveChats(){for(const k in chats)chats[k]=chats[k].slice(-30);lsSet("ritm-chat",JSON.stringify(chats))}
+async function aiSend(id,text){
+  if(!AI.on()||!text.trim()||ui.aiBusy)return;
+  const log=chats[id]=chats[id]||[];
+  log.push({role:"user",text:text.trim()});ui.aiBusy=true;ui.aiErr=null;render();scrollChat();
+  try{const ans=await AI.ask(aiSystem(id),log.slice(-12));log.push({role:"assistant",text:ans||"(пустой ответ)"});saveChats()}
+  catch(e){log.pop();ui.aiErr=aiErrText(e);ui.aiDraft=text}
+  ui.aiBusy=false;render();scrollChat();
+}
+function scrollChat(){const el=document.getElementById("chat-end");if(el)el.scrollIntoView({block:"end",behavior:"smooth"})}
+
+function viewAssist(){
+  const c=mkCtx(ui.date);
+  const all=L().map(s=>({s,items:s.items.map(itemOpt).filter(Boolean)})).filter(x=>x.items.length);
+  if(!ui.aiItem||!itemOpt(ui.aiItem))ui.aiItem=(all[0]&&all[0].items[0].id)||null;
+  const id=ui.aiItem,o=id?itemOpt(id):null,gk=id?guideKey(id,c)||(id==="train"?"train":null):null,g=gk?guideFor(gk):null;
+  const sel=`<select class="in asst-sel" data-ai-item aria-label="Пункт трекера">${all.map(x=>`<optgroup label="${esc(x.s.title)}">${x.items.map(i=>`<option value="${i.id}" ${i.id===id?"selected":""}>${esc(i.name)}</option>`).join("")}</optgroup>`).join("")}</select>`;
+  let h=`<div class="page-head"><div><h1>Помощник</h1><p class="lead">Выбери пункт — получишь методику и совет, как его выполнить.</p></div></div>
+    <section class="card"><div class="pad" style="display:flex;flex-direction:column;gap:12px">${sel}
+      ${o?`<div class="muted small">Сегодня: ${esc(itemNowText(id,c)||"—")}</div>`:""}
+      ${g?`<div class="gq">${esc(pickQ(g.q,gk))}</div>`:""}</div></section>`;
+  const guideCard=card({key:"as-guide",title:"Методика",def:AI.on(),body:g?`<div class="pad">${guideHtml(g)}</div>`:`<div class="pad"><p class="hint">Для этого пункта нет встроенной методики${AI.on()?" — спроси ИИ.":". Подключи ИИ в настройках, чтобы получать советы по своим пунктам."}</p></div>`});
+  if(!AI.on()){
+    h+=`<section class="card"><div class="pad" style="display:flex;flex-direction:column;gap:10px"><h2>Спросить ИИ</h2><p class="hint">Подключи нейросеть, чтобы задавать свои вопросы и получать советы с учётом твоего прогресса. Ключ хранится только на этом устройстве.</p><div><button class="btn primary" data-act="ai-setup">Подключить ИИ</button></div></div></section>`;
+    return h.replace("</section>","</section>"+guideCard);
+  }
+  const log=chats[id]||[];
+  h+=`<section class="card"><header class="card-h" style="cursor:default"><h2>Спросить ИИ</h2><span class="cnt">${esc(AI_PROVIDERS[AI.cfg.provider].name)}</span>${log.length?`<button class="link" data-act="ai-clear" style="margin-left:8px">Очистить</button>`:""}</header>
+    <div class="card-b pad chat">
+      ${log.map(m=>`<div class="msg ${m.role}">${m.role==="assistant"?mdLite(m.text):esc(m.text)}</div>`).join("")}
+      ${ui.aiBusy?`<div class="msg assistant typing"><i></i><i></i><i></i></div>`:""}
+      ${ui.aiErr?`<div class="notice err">${esc(ui.aiErr)}</div>`:""}
+      <div class="btns">${AI_QUICK.map(([l,q],i)=>`<button class="chip ghost" data-act="ai-quick" data-i="${i}" ${ui.aiBusy?"disabled":""}>${l}</button>`).join("")}</div>
+      <div class="chat-in"><textarea id="ai-text" rows="2" placeholder="Свой вопрос про «${esc(o?o.name:"")}»…" data-k="ai-text">${esc(ui.aiDraft||"")}</textarea><button class="btn primary" data-act="ai-send" ${ui.aiBusy?"disabled":""}>Спросить</button></div>
+      <span id="chat-end"></span>
+    </div></section>${guideCard}`;
+  return h;
+}
+function aiSettingsCard(){
+  const c=AI.cfg||{provider:"gemini"},P=AI_PROVIDERS[c.provider]||AI_PROVIDERS.gemini,on=AI.on();
+  return card({key:"set-ai",title:"ИИ-помощник",extra:on?"подключён":"выключен",body:`<div class="pad" style="display:flex;flex-direction:column;gap:12px">
+    <p class="hint">Методики по пунктам работают всегда. ИИ нужен, чтобы задавать свои вопросы и получать советы под твой прогресс. Ключ хранится только на этом устройстве и отправляется напрямую выбранному сервису.</p>
+    ${field("Сервис",`<select class="in" id="ai-prov" data-ai-prov>${Object.entries(AI_PROVIDERS).map(([k,v])=>`<option value="${k}" ${k===(c.provider||"gemini")?"selected":""}>${v.name}</option>`).join("")}</select>`)}
+    <p class="hint">${P.note}${P.keyUrl?` <a href="${P.keyUrl}" target="_blank" rel="noopener">Получить ключ</a>.`:""} Некоторые сервисы недоступны в отдельных странах — если не работает, попробуй другой.</p>
+    ${field("Ключ",`<input class="in txt" id="ai-key" type="password" autocomplete="off" placeholder="${P.ph}" value="${esc(c.key||"")}">`)}
+    ${field("Модель",`<input class="in txt" id="ai-model" type="text" placeholder="${esc(P.model||"название модели")}" value="${esc(c.model||"")}">`,`<span class="unit">пусто — по умолчанию</span>`)}
+    ${(c.provider==="openai")?field("Адрес API",`<input class="in txt" id="ai-base" type="text" placeholder="https://…/v1" value="${esc(c.base||"")}">`):""}
+    <label class="small muted" style="display:flex;flex-direction:column;gap:4px">О себе — ИИ учитывает это в ответах${area("s.aiAbout","",3)}</label>
+    <div class="btns"><button class="btn primary" data-act="ai-save">Сохранить и проверить</button>${on?confirmBtn("ai-off","Отключить","ai-off"):""}</div>
+    ${ui.msg&&ui.msg.k==="ai"?`<div class="notice ${ui.msg.err?"err":""}">${esc(ui.msg.t)}</div>`:""}</div>`});
+}
+
 /* ---------- render ---------- */
 const main=$("#main");
 function renderNav(){
   const nav=VIEWS.map(([v,l])=>`<button class="navb" data-act="nav" data-view="${v}" ${ui.view===v?'aria-current="page"':""}>${IC[v]}<span>${l}</span></button>`).join("");
   $("#navlist").innerHTML=nav;
-  $("#tabbar").innerHTML=VIEWS.filter(v=>v[0]!=="settings").map(([v,l])=>`<button data-act="nav" data-view="${v}" ${ui.view===v?'aria-current="page"':""}>${IC[v]}<span>${l}</span></button>`).join("");
+  $("#tabbar").innerHTML=VIEWS.filter(v=>v[0]!=="settings").map(([v,l])=>`<button data-act="nav" data-view="${v}" ${ui.view===v?'aria-current="page"':""}>${IC[v]}<span>${({stats:"Графики"})[v]||l}</span></button>`).join("");
   const th=lsGet("ritm-theme","auto");
   const tl={light:"Светлая тема",dark:"Тёмная тема",auto:"Тема как в системе"}[th],ti={light:IC.sun,dark:IC.moon,auto:IC.auto}[th];
   $("#themeBtn").innerHTML=`${ti}<span>${tl}</span>`;
@@ -804,7 +966,7 @@ function render(){
   if(!ui.focus&&ae&&("selectionStart"in ae)){try{ss=ae.selectionStart;se=ae.selectionEnd}catch(e){}}
   const y=window.scrollY;
   renderNav();
-  main.innerHTML={today:viewToday,library:viewLibrary,growth:viewGrowth,stats:viewStats,week:viewWeek,settings:viewSettings}[ui.view]();
+  main.innerHTML={assist:viewAssist,today:viewToday,library:viewLibrary,growth:viewGrowth,stats:viewStats,week:viewWeek,settings:viewSettings}[ui.view]();
   $("#exnames").innerHTML=allExNames().map(n=>`<option value="${esc(n)}">`).join("");
   if(fk){const el=main.querySelector(`[data-k="${CSS.escape(fk)}"]`);if(el){el.focus({preventScroll:true});if(ss!=null){try{el.setSelectionRange(ss,se)}catch(e){}}}}
   ui.focus=null;
@@ -827,7 +989,7 @@ function editField(el){
   if(el.dataset.imove){const id=el.dataset.imove,from=L()[Number(el.dataset.s)],to=L()[Number(el.value)];from.items=from.items.filter(x=>x!==id);to.items.push(id);markDirty("profile");return true}
   return false;
 }
-document.addEventListener("input",e=>{const el=e.target;if(el.dataset.bind&&el.type!=="checkbox"){setV(el.dataset.bind,readInput(el));return}if(el.type!=="checkbox"&&el.tagName!=="SELECT")editField(el)});
+document.addEventListener("input",e=>{const el=e.target;if(el.id==="ai-text"){ui.aiDraft=el.value;return}if(el.dataset.bind&&el.type!=="checkbox"){setV(el.dataset.bind,readInput(el));return}if(el.type!=="checkbox"&&el.tagName!=="SELECT")editField(el)});
 document.addEventListener("change",e=>{
   const el=e.target;
   if(el.dataset.bind){setV(el.dataset.bind,readInput(el));renderSoon();return}
@@ -836,12 +998,15 @@ document.addEventListener("change",e=>{
   if(el.dataset.readingBook){const t=el.dataset.readingBook,d=ensureDay(ui.date);d.read=d.read||{};d.read[t]=d.read[t]||{};d.read[t].book=el.value;markDirty("day",ui.date);renderSoon();return}
   if(el.dataset.bookStatus){const b=state.books[el.dataset.bookStatus];b.status=el.value;if(el.value==="done"){b.finished=b.finished||todayKey();if(b.total)b.cur=b.total}else b.finished=null;markDirty("book",b.id);renderSoon();return}
   if(el.hasAttribute("data-chart-ex")){ui.chartEx=el.value;renderSoon();return}
+  if(el.hasAttribute("data-ai-item")){ui.aiItem=el.value;ui.aiErr=null;renderSoon();return}
+  if(el.hasAttribute("data-ai-prov")){const k=$("#ai-key").value;AI.cfg={...(AI.cfg||{}),provider:el.value,model:"",key:AI.cfg&&AI.cfg.provider===el.value?AI.cfg.key:(k&&!AI.on()?k:"")};if(!AI.cfg.key)AI.cfg.key="";AI.save();renderSoon();return}
   if(el.id==="importFile"&&el.files[0]){
     const r=new FileReader();r.onload=()=>{try{const p=JSON.parse(r.result);if(!p||typeof p.days!=="object")throw 0;ui.pendingImport=p;ui.view="settings";ui.cards["set-data"]=false;render()}catch(err){ui.msg={k:"data",t:"Этот файл не похож на резервную копию трекера."};ui.view="settings";render()}};r.readAsText(el.files[0]);el.value="";
   }
 });
 document.addEventListener("keydown",e=>{
   if((e.key==="Enter"||e.key===" ")&&e.target.matches("[role=button][data-act],li[data-act]")){e.preventDefault();e.target.click()}
+  if(e.key==="Enter"&&!e.shiftKey&&e.target.id==="ai-text"){e.preventDefault();document.querySelector('[data-act="ai-send"]').click()}
   if(e.key==="Enter"&&e.target.id==="sync-token"){e.preventDefault();document.querySelector('[data-act="sync-connect"]').click()}
 });
 
@@ -883,6 +1048,19 @@ document.addEventListener("click",async e=>{
     case "stage":{state.settings.hobby[a.dataset.kind]=Number(a.dataset.i);markDirty("profile");break}
     case "wish-add":{const n=$("#wish-new").value.trim();if(!n)return;state.settings.hobby.wish.push({id:"w"+Date.now(),name:n});markDirty("profile");break}
     case "wish-del":{state.settings.hobby.wish=state.settings.hobby.wish.filter(x=>x.id!==a.dataset.id);markDirty("profile");break}
+    case "guide":{const key=a.dataset.key;ui.guide.has(key)?ui.guide.delete(key):ui.guide.add(key);break}
+    case "ask-ai":{ui.view="assist";ui.aiItem=a.dataset.item;ui.aiErr=null;ui.edit=false;render();window.scrollTo(0,0);if(!(chats[ui.aiItem]||[]).length)aiSend(ui.aiItem,AI_QUICK[0][1]);return}
+    case "ai-quick":aiSend(ui.aiItem,AI_QUICK[Number(a.dataset.i)][1]);return;
+    case "ai-send":{const t=$("#ai-text").value;ui.aiDraft="";aiSend(ui.aiItem,t);return}
+    case "ai-clear":delete chats[ui.aiItem];saveChats();ui.aiErr=null;break;
+    case "ai-setup":ui.view="settings";ui.cards["set-ai"]=false;ui.scrollTo="card-set-ai";break;
+    case "ai-off":AI.cfg=null;AI.save();ui.confirm=null;ui.msg=null;break;
+    case "ai-save":{const prov=$("#ai-prov").value,key=$("#ai-key").value.trim();if(!key){$("#ai-key").focus();return}
+      AI.cfg={provider:prov,key,model:$("#ai-model").value.trim(),base:$("#ai-base")?$("#ai-base").value.trim():""};AI.save();
+      a.disabled=true;a.textContent="Проверяю…";
+      try{const r=await AI.ask("Ответь одним словом.",[{role:"user",text:"Скажи «готово»."}]);ui.msg={k:"ai",t:`Работает. Ответ сервиса: «${String(r).trim().slice(0,40)}». Теперь в пунктах есть кнопка «Спросить ИИ».`}}
+      catch(e){ui.msg={k:"ai",err:true,t:aiErrText(e)+" Ключ сохранён — можно поправить настройки и проверить снова."}}
+      break}
     case "now":setV(a.dataset.bind,nowHM());break;
     case "bed-now":{const now=new Date(),tk=todayKey();const dk=now.getHours()<5&&ui.date===tk?addDays(tk,-1):ui.date;const dd=ensureDay(dk);dd.night=dd.night||{};dd.night.bed=nowHM();markDirty("day",dk);break}
     case "edit-on":ui.edit=true;ui.confirm=null;render();window.scrollTo(0,0);return;
@@ -932,7 +1110,7 @@ function exportData(){
 }
 
 /* ---------- start ---------- */
-Sync.load();loadLocal();applyTheme();
+Sync.load();AI.load();loadLocal();applyTheme();
 matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change",applyTheme);
 async function connectFromHash(){
   const m=location.hash.match(/connect=([^&]+)/);if(!m)return false;
